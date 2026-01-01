@@ -19,6 +19,7 @@ ESPIoTLog::ESPIoTLog() :
     _multicast_port(DEFAULT_MULTICAST_PORT),
     _log_level(LOG_LEVEL_INFO),
     _log_mask(LOG_MASK_ALL),
+    _serial_enabled(true),
     _discovery_interval(DEFAULT_DISCOVERY_INTERVAL),
     _telemetry_flags(TELEMETRY_NONE),
     _initialized(false),
@@ -66,10 +67,22 @@ bool ESPIoTLog::begin(const char* device_name, log_level_t level) {
         return false;
     }
 
-    // Initialize mDNS
-    if (!MDNS.begin(_device_name)) {
-        Serial.println("ESPIoTLog: Failed to start mDNS");
-        return false;
+    // Initialize mDNS only if not already running
+    bool mdns_started = false;
+#ifdef ESP32
+    // Try to query mDNS to see if it's already running
+    int test_result = MDNS.queryService("test", "tcp");
+    mdns_started = (test_result >= 0); // -1 indicates mDNS not initialized
+#elif defined(ESP8266)
+    // ESP8266: Check if mDNS is already running by checking instance
+    mdns_started = MDNS.isRunning();
+#endif
+
+    if (!mdns_started) {
+        if (!MDNS.begin(_device_name)) {
+            Serial.println("ESPIoTLog: Failed to start mDNS");
+            return false;
+        }
     }
 
     _initialized = true;
@@ -96,6 +109,10 @@ void ESPIoTLog::setLogLevel(log_level_t level) {
 
 void ESPIoTLog::setLogMask(uint8_t mask) {
     _log_mask = mask;
+}
+
+void ESPIoTLog::setSerialEnabled(bool enable) {
+    _serial_enabled = enable;
 }
 
 void ESPIoTLog::setMulticastAddress(const char* ip, uint16_t port) {
@@ -183,20 +200,22 @@ void ESPIoTLog::logf(log_level_t level, const char* format, va_list args) {
         return;
     }
 
-    // Always output to Serial for local debugging
-    char timestamp[16];
-    snprintf(timestamp, sizeof(timestamp), "[%010lu]", millis());
-    Serial.printf("%s [%s] ", timestamp, LOG_LEVEL_NAMES[level]);
+    // Output to Serial if enabled
+    if (_serial_enabled) {
+        char timestamp[16];
+        snprintf(timestamp, sizeof(timestamp), "[%010lu]", millis());
+        Serial.printf("%s [%s] ", timestamp, LOG_LEVEL_NAMES[level]);
 
 #ifdef ESP32
-    Serial.vprintf(format, args);
+        Serial.vprintf(format, args);
 #elif defined(ESP8266)
-    // ESP8266 doesn't have vprintf, so format manually
-    char message[256];
-    vsnprintf(message, sizeof(message), format, args);
-    Serial.print(message);
+        // ESP8266 doesn't have vprintf, so format manually
+        char message[SERIAL_FORMAT_BUFFER_SIZE];
+        vsnprintf(message, sizeof(message), format, args);
+        Serial.print(message);
 #endif
-    Serial.println();
+        Serial.println();
+    }
 
     // Only send via network if listener is active
     if (!_listener_active) {
@@ -366,9 +385,9 @@ void ESPIoTLog::collectTelemetry(SystemTelemetry& tel) {
 #ifdef ESP32
         tel.heap_largest_block = ESP.getMaxAllocHeap();
         tel.heap_fragmentation = 100 - (tel.heap_largest_block * 100 / tel.heap_free);
-#else
-        tel.heap_largest_block = 0; // Not available on ESP8266
-        tel.heap_fragmentation = 0;
+#elif defined(ESP8266)
+        tel.heap_largest_block = ESP.getMaxFreeBlockSize();
+        tel.heap_fragmentation = 100 - (tel.heap_largest_block * 100 / tel.heap_free);
 #endif
     }
 

@@ -123,6 +123,10 @@ iotlog.setDiscoveryInterval(10000);  // Check every 10 seconds
 // Runtime log filtering (inspired by arcao/Syslog)
 iotlog.setLogMask(LOG_MASK_ERROR | LOG_MASK_WARN);  // Only errors and warnings
 iotlog.setLogMask(LOG_MASK_ALL);                    // All levels (default)
+
+// Optional serial output control (reduces overhead when not needed)
+iotlog.setSerialEnabled(false);                     // Disable serial logging
+iotlog.setSerialEnabled(true);                      // Enable serial logging (default)
 ```
 
 ### Logging Methods
@@ -357,10 +361,11 @@ iotlog.logStartupInfo();
 ## Performance Characteristics
 
 ### Memory Usage
-- **Library overhead**: ~9KB flash, ~2KB RAM (with ESP-IDF features)
-- **Log buffer**: 512 bytes (configurable)
+- **ESP32**: ~9KB flash, ~2KB RAM (with ESP-IDF features)
+- **ESP8266**: ~7KB flash, ~1.5KB RAM (optimized buffers)
+- **Log buffer**: 512 bytes (ESP32), 256 bytes (ESP8266)
 - **Zero allocation**: When no listeners detected
-- **Advanced telemetry**: +1KB overhead when enabled
+- **Serial output**: Optional (can be disabled to reduce overhead)
 
 ### Network Performance
 - **Message rate**: 50-100 messages/second typical
@@ -378,9 +383,10 @@ iotlog.logStartupInfo();
 |---------|-------|---------|
 | **Basic Features** | | |
 | Core Temperature | ✓ Available | ✗ Not available |
-| Heap Fragmentation | ✓ Detailed stats | ✗ Basic only |
+| Heap Fragmentation | ✓ Detailed stats | ✓ **Fixed** - now available |
 | Stack Monitoring | ✓ FreeRTOS support | ✗ Limited |
 | Crash Handling | ✓ Full exception hooks | ✓ Basic reset info |
+| Memory Optimization | ✓ Full buffers (512B) | ✓ **Optimized** (256B) |
 | **ESP-IDF Advanced** | | |
 | Per-Capability Heap | ✓ Internal/PSRAM/DMA | ✗ Not supported |
 | Task Analysis | ✓ Full FreeRTOS monitoring | ✗ Not supported |

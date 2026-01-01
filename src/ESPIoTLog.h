@@ -44,8 +44,17 @@
 #define DEFAULT_MULTICAST_PORT 4210
 #define DEFAULT_SERVICE_NAME "_esp-iot-log._udp.local"
 #define DEFAULT_DISCOVERY_INTERVAL 10000  // 10 seconds
-#define DEFAULT_LOG_BUFFER_SIZE 512
-#define DEFAULT_MAX_MESSAGE_SIZE 256
+
+// Platform-specific buffer sizes
+#ifdef ESP8266
+  #define DEFAULT_LOG_BUFFER_SIZE 256      // Smaller for ESP8266
+  #define DEFAULT_MAX_MESSAGE_SIZE 128     // Smaller for ESP8266
+  #define SERIAL_FORMAT_BUFFER_SIZE 128    // Smaller serial buffer
+#else
+  #define DEFAULT_LOG_BUFFER_SIZE 512      // Full size for ESP32
+  #define DEFAULT_MAX_MESSAGE_SIZE 256     // Full size for ESP32
+  #define SERIAL_FORMAT_BUFFER_SIZE 256    // Full serial buffer
+#endif
 
 // Log level masks for selective filtering
 #define LOG_MASK_NONE     0x00
@@ -160,6 +169,7 @@ public:
     // Configuration
     void setLogLevel(log_level_t level);
     void setLogMask(uint8_t mask);  // Bitmask to enable/disable specific levels
+    void setSerialEnabled(bool enable);  // Control serial output (default: true)
     void setMulticastAddress(const char* ip, uint16_t port);
     void setDiscoveryInterval(uint32_t interval_ms);
     void setServiceName(const char* service);
@@ -228,6 +238,7 @@ private:
     char _service_name[64];
     log_level_t _log_level;
     uint8_t _log_mask;
+    bool _serial_enabled;
     uint32_t _discovery_interval;
     uint8_t _telemetry_flags;
 
