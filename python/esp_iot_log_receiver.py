@@ -1,0 +1,456 @@
+#!/usr/bin/env python3
+"""
+ESP IoT Log Receiver
+Copyright (c) 2026 Bruce Fitzsimons
+
+Cross-platform Python script to receive multicast logs from ESP devices.
+Advertises mDNS service to let ESP devices know a listener is active.
+"""
+
+import sys
+import time
+import socket
+import struct
+import threading
+import argparse
+import json
+import signal
+from datetime import datetime, timezone
+from typing import Optional, Dict, Any
+
+# Platform-specific mDNS imports
+try:
+    from zeroconf import ServiceInfo, Zeroconf, IPVersion
+    HAS_ZEROCONF = True
+except ImportError:
+    print("Warning: zeroconf not available. Install with: pip install zeroconf")
+    HAS_ZEROCONF = False
+
+# Default configuration
+DEFAULT_MULTICAST_IP = "239.255.1.100"
+DEFAULT_MULTICAST_PORT = 4210
+DEFAULT_SERVICE_NAME = "_esp-iot-log._udp.local."
+
+# Protocol constants
+LOG_MAGIC = 0xE510
+PROTOCOL_VERSION = 1
+
+# Log types
+LOG_TYPE_TEXT = 0x01
+LOG_TYPE_TELEMETRY = 0x02
+LOG_TYPE_EXCEPTION = 0x03
+LOG_TYPE_METRIC = 0x04
+
+# Log levels
+LOG_LEVELS = ["NONE", "ERROR", "WARN", "INFO", "DEBUG", "VERBOSE"]
+
+# ANSI color codes
+class Colors:
+    RESET = '\033[0m'
+    ERROR = '\033[91m'    # Red
+    WARN = '\033[93m'     # Yellow
+    INFO = '\033[94m'     # Blue
+    DEBUG = '\033[92m'    # Green
+    VERBOSE = '\033[95m'  # Magenta
+    TIMESTAMP = '\033[90m' # Gray
+    DEVICE = '\033[96m'   # Cyan
+
+class LogMessage:
+    """Represents a parsed log message from ESP device."""
+
+    def __init__(self, header: Dict, payload: bytes):
+        self.magic = header['magic']
+        self.version = header['version']
+        self.device_id = header['device_id']
+        self.timestamp = header['timestamp']
+        self.log_type = header['log_type']
+        self.length = header['length']
+        self.payload = payload
+        self.parsed_payload = None
+        self.received_time = datetime.now(timezone.utc)
+
+        self._parse_payload()
+
+    def _parse_payload(self):
+        """Parse payload based on log type."""
+        try:
+            if self.log_type == LOG_TYPE_TEXT:
+                if len(self.payload) >= 1:
+                    level = self.payload[0]
+                    message = self.payload[1:].decode('utf-8', errors='replace')
+                    self.parsed_payload = {'level': level, 'message': message}
+
+            elif self.log_type == LOG_TYPE_TELEMETRY:
+                if len(self.payload) >= 24:  # Size of SystemTelemetry struct
+                    tel = struct.unpack('<IIBBBHHBII H', self.payload[:24])
+                    self.parsed_payload = {
+                        'heap_free': tel[0],
+                        'heap_largest_block': tel[1],
+                        'heap_fragmentation': tel[2],
+                        'wifi_rssi': tel[3] if tel[3] != 255 else None,
+                        'wifi_status': tel[4],
+                        'wifi_reconnects': tel[5],
+                        'temperature': tel[6] / 10.0 if tel[6] != 0x7FFF else None,
+                        'reset_reason': tel[7],
+                        'uptime': tel[8],
+                        'free_stack': tel[9]
+                    }
+
+            elif self.log_type == LOG_TYPE_EXCEPTION:
+                if len(self.payload) >= 72:  # Size of CrashData struct
+                    crash = struct.unpack('<I I B B H I I 8I 32s B', self.payload[:72])
+                    self.parsed_payload = {
+                        'magic': crash[0],
+                        'timestamp': crash[1],
+                        'crash_type': crash[2],
+                        'reset_reason': crash[3],
+                        'heap_free': crash[4],
+                        'stack_ptr': crash[5],
+                        'pc': crash[6],
+                        'backtrace': list(crash[7:15]),
+                        'last_function': crash[15].decode('utf-8', errors='replace').rstrip('\x00'),
+                        'checksum': crash[16]
+                    }
+
+            elif self.log_type == LOG_TYPE_METRIC:
+                if len(self.payload) >= 1:
+                    name_len = self.payload[0]
+                    if len(self.payload) >= 1 + name_len + 4:
+                        name = self.payload[1:1+name_len].decode('utf-8', errors='replace')
+                        if len(self.payload) == 1 + name_len + 4:
+                            # Integer metric
+                            value = struct.unpack('<i', self.payload[1+name_len:1+name_len+4])[0]
+                        else:
+                            # String metric
+                            value_len = self.payload[1+name_len]
+                            value = self.payload[2+name_len:2+name_len+value_len].decode('utf-8', errors='replace')
+
+                        self.parsed_payload = {'name': name, 'value': value}
+
+        except Exception as e:
+            print(f"Error parsing payload: {e}")
+            self.parsed_payload = None
+
+    def format_device_id(self) -> str:
+        """Format device ID as MAC address."""
+        return ':'.join(f'{(self.device_id >> (8*i)) & 0xFF:02X}' for i in range(6))
+
+    def format_timestamp(self) -> str:
+        """Format device timestamp (millis since boot)."""
+        seconds = self.timestamp / 1000
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        millis = int(self.timestamp % 1000)
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}"
+
+    def __str__(self) -> str:
+        """Format log message for display."""
+        device_short = self.format_device_id()[-8:]  # Last 4 bytes of MAC
+        timestamp = self.format_timestamp()
+        received = self.received_time.strftime("%H:%M:%S.%f")[:-3]
+
+        if self.log_type == LOG_TYPE_TEXT and self.parsed_payload:
+            level = self.parsed_payload['level']
+            level_name = LOG_LEVELS[level] if level < len(LOG_LEVELS) else f"L{level}"
+            message = self.parsed_payload['message']
+
+            # Colorize based on log level
+            color = Colors.RESET
+            if level == 1:  # ERROR
+                color = Colors.ERROR
+            elif level == 2:  # WARN
+                color = Colors.WARN
+            elif level == 3:  # INFO
+                color = Colors.INFO
+            elif level == 4:  # DEBUG
+                color = Colors.DEBUG
+            elif level == 5:  # VERBOSE
+                color = Colors.VERBOSE
+
+            return (f"{Colors.TIMESTAMP}{received}{Colors.RESET} "
+                   f"{Colors.DEVICE}{device_short}{Colors.RESET} "
+                   f"[{timestamp}] "
+                   f"{color}[{level_name:>7s}]{Colors.RESET} "
+                   f"{message}")
+
+        elif self.log_type == LOG_TYPE_TELEMETRY and self.parsed_payload:
+            tel = self.parsed_payload
+            temp_str = f"{tel['temperature']:.1f}°C" if tel['temperature'] is not None else "N/A"
+            wifi_str = f"{tel['wifi_rssi']}dBm" if tel['wifi_rssi'] is not None else "N/A"
+
+            return (f"{Colors.TIMESTAMP}{received}{Colors.RESET} "
+                   f"{Colors.DEVICE}{device_short}{Colors.RESET} "
+                   f"[{timestamp}] "
+                   f"{Colors.INFO}[TELEMETRY]{Colors.RESET} "
+                   f"Heap: {tel['heap_free']}B (frag: {tel['heap_fragmentation']}%), "
+                   f"WiFi: {wifi_str}, Temp: {temp_str}, "
+                   f"Stack: {tel['free_stack']}B, Uptime: {tel['uptime']/1000:.1f}s")
+
+        elif self.log_type == LOG_TYPE_EXCEPTION and self.parsed_payload:
+            crash = self.parsed_payload
+            return (f"{Colors.TIMESTAMP}{received}{Colors.RESET} "
+                   f"{Colors.DEVICE}{device_short}{Colors.RESET} "
+                   f"[{timestamp}] "
+                   f"{Colors.ERROR}[CRASH]{Colors.RESET} "
+                   f"Type: {crash['crash_type']}, Reason: {crash['reset_reason']}, "
+                   f"Heap: {crash['heap_free']}KB, PC: 0x{crash['pc']:08X}, "
+                   f"Func: {crash['last_function'] or 'unknown'}")
+
+        elif self.log_type == LOG_TYPE_METRIC and self.parsed_payload:
+            metric = self.parsed_payload
+            return (f"{Colors.TIMESTAMP}{received}{Colors.RESET} "
+                   f"{Colors.DEVICE}{device_short}{Colors.RESET} "
+                   f"[{timestamp}] "
+                   f"{Colors.VERBOSE}[METRIC]{Colors.RESET} "
+                   f"{metric['name']} = {metric['value']}")
+
+        else:
+            return (f"{Colors.TIMESTAMP}{received}{Colors.RESET} "
+                   f"{Colors.DEVICE}{device_short}{Colors.RESET} "
+                   f"[{timestamp}] "
+                   f"[TYPE_{self.log_type}] "
+                   f"Unknown payload ({len(self.payload)} bytes)")
+
+class ESPIoTLogReceiver:
+    """Main receiver class that handles mDNS advertising and UDP multicast listening."""
+
+    def __init__(self, multicast_ip: str, port: int, service_name: str,
+                 output_file: Optional[str] = None, json_output: bool = False):
+        self.multicast_ip = multicast_ip
+        self.port = port
+        self.service_name = service_name
+        self.output_file = output_file
+        self.json_output = json_output
+        self.running = False
+
+        # Network objects
+        self.sock = None
+        self.zeroconf = None
+        self.service_info = None
+
+        # Statistics
+        self.message_count = 0
+        self.start_time = time.time()
+        self.devices_seen = set()
+
+        # File output
+        self.file_handle = None
+        if output_file:
+            self.file_handle = open(output_file, 'a', encoding='utf-8')
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.stop()
+
+    def start(self):
+        """Start the receiver - advertise service and begin listening."""
+        print(f"Starting ESP IoT Log Receiver...")
+        print(f"Multicast: {self.multicast_ip}:{self.port}")
+        print(f"Service: {self.service_name}")
+
+        self.running = True
+
+        # Start mDNS service advertising
+        if HAS_ZEROCONF:
+            try:
+                self._start_mdns_service()
+                print("✓ mDNS service advertised")
+            except Exception as e:
+                print(f"⚠ mDNS service failed: {e}")
+        else:
+            print("⚠ mDNS not available - devices won't auto-discover this listener")
+
+        # Start UDP multicast listener
+        try:
+            self._start_udp_listener()
+            print("✓ UDP multicast listener started")
+        except Exception as e:
+            print(f"✗ UDP listener failed: {e}")
+            self.stop()
+            return False
+
+        print(f"\nListening for ESP IoT logs... (Press Ctrl+C to stop)\n")
+        return True
+
+    def stop(self):
+        """Stop the receiver and clean up resources."""
+        self.running = False
+
+        if self.sock:
+            self.sock.close()
+
+        if self.zeroconf:
+            self.zeroconf.unregister_service(self.service_info)
+            self.zeroconf.close()
+
+        if self.file_handle:
+            self.file_handle.close()
+
+        # Print statistics
+        runtime = time.time() - self.start_time
+        print(f"\n--- Session Statistics ---")
+        print(f"Runtime: {runtime:.1f}s")
+        print(f"Messages received: {self.message_count}")
+        print(f"Devices seen: {len(self.devices_seen)}")
+        if runtime > 0:
+            print(f"Average rate: {self.message_count / runtime:.1f} msgs/sec")
+
+    def _start_mdns_service(self):
+        """Start mDNS service to advertise that we're listening."""
+        if not HAS_ZEROCONF:
+            return
+
+        # Get local IP address
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+
+        # Create service info
+        self.service_info = ServiceInfo(
+            "_esp-iot-log._udp.local.",
+            f"ESP-IoT-Log-Receiver._esp-iot-log._udp.local.",
+            addresses=[socket.inet_aton(local_ip)],
+            port=self.port,
+            properties={'multicast': self.multicast_ip, 'version': '1.0'},
+        )
+
+        # Register service
+        self.zeroconf = Zeroconf(ip_version=IPVersion.V4Only)
+        self.zeroconf.register_service(self.service_info)
+
+    def _start_udp_listener(self):
+        """Start UDP multicast socket listener."""
+        # Create UDP socket
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+        # Bind to multicast address
+        self.sock.bind((self.multicast_ip, self.port))
+
+        # Join multicast group
+        mreq = struct.pack("4s4s", socket.inet_aton(self.multicast_ip), socket.inet_aton("0.0.0.0"))
+        self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+
+        # Set timeout for graceful shutdown
+        self.sock.settimeout(1.0)
+
+    def listen(self):
+        """Main listening loop."""
+        while self.running:
+            try:
+                data, addr = self.sock.recvfrom(1024)
+                self._handle_message(data, addr)
+            except socket.timeout:
+                continue  # Check running flag
+            except Exception as e:
+                if self.running:
+                    print(f"Error receiving data: {e}")
+
+    def _handle_message(self, data: bytes, addr):
+        """Parse and display received log message."""
+        try:
+            # Parse header
+            if len(data) < 19:  # Minimum header size
+                return
+
+            header_data = data[:19]
+            magic, version, device_id, timestamp, log_type, length = struct.unpack('<HBQ I B H', header_data)
+
+            if magic != LOG_MAGIC:
+                return  # Not our protocol
+
+            header = {
+                'magic': magic,
+                'version': version,
+                'device_id': device_id,
+                'timestamp': timestamp,
+                'log_type': log_type,
+                'length': length
+            }
+
+            # Extract payload and verify checksum
+            payload_end = 19 + length
+            if len(data) < payload_end + 2:  # +2 for checksum
+                return
+
+            payload = data[19:payload_end]
+            checksum = struct.unpack('<H', data[payload_end:payload_end+2])[0]
+
+            # TODO: Verify checksum if needed
+
+            # Create log message and display
+            log_msg = LogMessage(header, payload)
+
+            # Track statistics
+            self.message_count += 1
+            self.devices_seen.add(log_msg.device_id)
+
+            # Output message
+            if self.json_output:
+                self._output_json(log_msg)
+            else:
+                print(log_msg)
+
+            # Write to file if specified
+            if self.file_handle:
+                self.file_handle.write(str(log_msg) + '\n')
+                self.file_handle.flush()
+
+        except Exception as e:
+            print(f"Error parsing message: {e}")
+
+    def _output_json(self, log_msg: LogMessage):
+        """Output log message in JSON format."""
+        json_data = {
+            'timestamp': log_msg.received_time.isoformat(),
+            'device_id': log_msg.format_device_id(),
+            'device_timestamp': log_msg.timestamp,
+            'log_type': log_msg.log_type,
+            'payload': log_msg.parsed_payload
+        }
+        print(json.dumps(json_data))
+
+def signal_handler(signum, frame):
+    """Handle Ctrl+C gracefully."""
+    print("\nShutting down...")
+    sys.exit(0)
+
+def main():
+    """Main entry point."""
+    parser = argparse.ArgumentParser(description='ESP IoT Log Receiver')
+    parser.add_argument('--ip', default=DEFAULT_MULTICAST_IP,
+                       help=f'Multicast IP address (default: {DEFAULT_MULTICAST_IP})')
+    parser.add_argument('--port', type=int, default=DEFAULT_MULTICAST_PORT,
+                       help=f'UDP port (default: {DEFAULT_MULTICAST_PORT})')
+    parser.add_argument('--service', default=DEFAULT_SERVICE_NAME,
+                       help=f'mDNS service name (default: {DEFAULT_SERVICE_NAME})')
+    parser.add_argument('--output', '-o', help='Output file for logs')
+    parser.add_argument('--json', action='store_true',
+                       help='Output in JSON format')
+    parser.add_argument('--no-color', action='store_true',
+                       help='Disable colored output')
+
+    args = parser.parse_args()
+
+    # Disable colors if requested or output is not a TTY
+    if args.no_color or not sys.stdout.isatty():
+        for attr in dir(Colors):
+            if not attr.startswith('_'):
+                setattr(Colors, attr, '')
+
+    # Set up signal handler
+    signal.signal(signal.SIGINT, signal_handler)
+
+    # Start receiver
+    with ESPIoTLogReceiver(args.ip, args.port, args.service, args.output, args.json) as receiver:
+        if receiver.start():
+            try:
+                receiver.listen()
+            except KeyboardInterrupt:
+                pass
+
+if __name__ == '__main__':
+    main()

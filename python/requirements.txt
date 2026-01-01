@@ -1,0 +1,9 @@
+# ESP IoT Log Receiver Dependencies
+# Install with: pip install -r requirements.txt
+
+# mDNS service discovery and advertising
+zeroconf>=0.47.0
+
+# Standard library dependencies (should be available by default):
+# - socket, struct, threading, argparse, json, signal
+# - time, datetime, sys, typing

@@ -1,0 +1,479 @@
+/**
+ * ESP IoT Log - Implementation
+ * Copyright (c) 2026 Bruce Fitzsimons
+ */
+
+#include "ESPIoTLog.h"
+#include <stdarg.h>
+#include <stdio.h>
+
+// Global instance
+ESPIoTLog iotlog;
+
+// Log level strings
+static const char* LOG_LEVEL_NAMES[] = {
+    "NONE", "ERROR", "WARN", "INFO", "DEBUG", "VERBOSE"
+};
+
+ESPIoTLog::ESPIoTLog() :
+    _multicast_port(DEFAULT_MULTICAST_PORT),
+    _log_level(LOG_LEVEL_INFO),
+    _log_mask(LOG_MASK_ALL),
+    _discovery_interval(DEFAULT_DISCOVERY_INTERVAL),
+    _telemetry_flags(TELEMETRY_NONE),
+    _initialized(false),
+    _listener_active(false),
+    _crash_logging_enabled(false),
+    _last_discovery(0),
+    _last_telemetry(0),
+    _log_count(0),
+    _dropped_count(0),
+    _device_id(0),
+    _buffer_size(DEFAULT_LOG_BUFFER_SIZE)
+{
+    strncpy(_multicast_ip, DEFAULT_MULTICAST_IP, sizeof(_multicast_ip));
+    strncpy(_service_name, DEFAULT_SERVICE_NAME, sizeof(_service_name));
+    _device_name[0] = '\0';
+}
+
+ESPIoTLog::~ESPIoTLog() {
+    end();
+}
+
+bool ESPIoTLog::begin(const char* device_name, log_level_t level) {
+    if (_initialized) {
+        return true;
+    }
+
+    // Set device name
+    if (device_name) {
+        strncpy(_device_name, device_name, sizeof(_device_name) - 1);
+        _device_name[sizeof(_device_name) - 1] = '\0';
+    } else {
+#ifdef ESP32
+        snprintf(_device_name, sizeof(_device_name), "ESP-%llX", ESP.getEfuseMac());
+#elif defined(ESP8266)
+        snprintf(_device_name, sizeof(_device_name), "ESP-%08X", ESP.getChipId());
+#endif
+    }
+
+    _log_level = level;
+    _device_id = getDeviceId();
+
+    // Parse multicast IP
+    if (!_multicast_addr.fromString(_multicast_ip)) {
+        Serial.println("ESPIoTLog: Invalid multicast IP");
+        return false;
+    }
+
+    // Initialize mDNS
+    if (!MDNS.begin(_device_name)) {
+        Serial.println("ESPIoTLog: Failed to start mDNS");
+        return false;
+    }
+
+    _initialized = true;
+
+    info("ESPIoTLog initialized: %s", _device_name);
+
+    // Check for crash data from previous boot
+    checkAndLogCrashes();
+
+    return true;
+}
+
+void ESPIoTLog::end() {
+    if (!_initialized) return;
+
+    _udp.stop();
+    _initialized = false;
+    _listener_active = false;
+}
+
+void ESPIoTLog::setLogLevel(log_level_t level) {
+    _log_level = level;
+}
+
+void ESPIoTLog::setLogMask(uint8_t mask) {
+    _log_mask = mask;
+}
+
+void ESPIoTLog::setMulticastAddress(const char* ip, uint16_t port) {
+    strncpy(_multicast_ip, ip, sizeof(_multicast_ip) - 1);
+    _multicast_ip[sizeof(_multicast_ip) - 1] = '\0';
+    _multicast_port = port;
+    _multicast_addr.fromString(_multicast_ip);
+}
+
+void ESPIoTLog::setDiscoveryInterval(uint32_t interval_ms) {
+    _discovery_interval = interval_ms;
+}
+
+void ESPIoTLog::setServiceName(const char* service) {
+    strncpy(_service_name, service, sizeof(_service_name) - 1);
+    _service_name[sizeof(_service_name) - 1] = '\0';
+}
+
+void ESPIoTLog::enableSystemTelemetry(uint8_t flags) {
+    _telemetry_flags = flags;
+}
+
+void ESPIoTLog::error(const char* format, ...) {
+    if (_log_level >= LOG_LEVEL_ERROR) {
+        va_list args;
+        va_start(args, format);
+        logf(LOG_LEVEL_ERROR, format, args);
+        va_end(args);
+    }
+}
+
+void ESPIoTLog::warn(const char* format, ...) {
+    if (_log_level >= LOG_LEVEL_WARN) {
+        va_list args;
+        va_start(args, format);
+        logf(LOG_LEVEL_WARN, format, args);
+        va_end(args);
+    }
+}
+
+void ESPIoTLog::info(const char* format, ...) {
+    if (_log_level >= LOG_LEVEL_INFO) {
+        va_list args;
+        va_start(args, format);
+        logf(LOG_LEVEL_INFO, format, args);
+        va_end(args);
+    }
+}
+
+void ESPIoTLog::debug(const char* format, ...) {
+    if (_log_level >= LOG_LEVEL_DEBUG) {
+        va_list args;
+        va_start(args, format);
+        logf(LOG_LEVEL_DEBUG, format, args);
+        va_end(args);
+    }
+}
+
+void ESPIoTLog::verbose(const char* format, ...) {
+    if (_log_level >= LOG_LEVEL_VERBOSE) {
+        va_list args;
+        va_start(args, format);
+        logf(LOG_LEVEL_VERBOSE, format, args);
+        va_end(args);
+    }
+}
+
+void ESPIoTLog::log(log_level_t level, const char* format, ...) {
+    if (_log_level >= level) {
+        va_list args;
+        va_start(args, format);
+        logf(level, format, args);
+        va_end(args);
+    }
+}
+
+void ESPIoTLog::logf(log_level_t level, const char* format, va_list args) {
+    if (!_initialized || _log_level < level) {
+        return;
+    }
+
+    // Check log mask for runtime filtering
+    uint8_t level_mask = 1 << (level - 1);
+    if ((_log_mask & level_mask) == 0) {
+        return;
+    }
+
+    // Always output to Serial for local debugging
+    char timestamp[16];
+    snprintf(timestamp, sizeof(timestamp), "[%010lu]", millis());
+    Serial.printf("%s [%s] ", timestamp, LOG_LEVEL_NAMES[level]);
+
+#ifdef ESP32
+    Serial.vprintf(format, args);
+#elif defined(ESP8266)
+    // ESP8266 doesn't have vprintf, so format manually
+    char message[256];
+    vsnprintf(message, sizeof(message), format, args);
+    Serial.print(message);
+#endif
+    Serial.println();
+
+    // Only send via network if listener is active
+    if (!_listener_active) {
+        return;
+    }
+
+    // Format message for network transmission
+    vsnprintf(_log_buffer, _buffer_size - 1, format, args);
+    _log_buffer[_buffer_size - 1] = '\0';
+
+    formatLogMessage(level, _log_buffer);
+}
+
+void ESPIoTLog::logMetric(const char* name, int32_t value) {
+    if (!_initialized || !_listener_active) return;
+
+    // Create metric payload: name_length(1) + name + value(4)
+    size_t name_len = strlen(name);
+    if (name_len > 255) name_len = 255;
+
+    uint8_t payload[260]; // 1 + 255 + 4
+    payload[0] = (uint8_t)name_len;
+    memcpy(payload + 1, name, name_len);
+    memcpy(payload + 1 + name_len, &value, sizeof(value));
+
+    sendLogMessage(LOG_TYPE_METRIC, payload, 1 + name_len + sizeof(value));
+}
+
+void ESPIoTLog::logMetric(const char* name, const char* value) {
+    if (!_initialized || !_listener_active) return;
+
+    // Create string metric payload: name_length(1) + name + value_length(1) + value
+    size_t name_len = strlen(name);
+    size_t value_len = strlen(value);
+    if (name_len > 255) name_len = 255;
+    if (value_len > 255) value_len = 255;
+
+    uint8_t payload[512]; // 1 + 255 + 1 + 255
+    payload[0] = (uint8_t)name_len;
+    memcpy(payload + 1, name, name_len);
+    payload[1 + name_len] = (uint8_t)value_len;
+    memcpy(payload + 2 + name_len, value, value_len);
+
+    sendLogMessage(LOG_TYPE_METRIC, payload, 2 + name_len + value_len);
+}
+
+void ESPIoTLog::forceDiscovery() {
+    _last_discovery = 0; // Force immediate discovery
+}
+
+void ESPIoTLog::sendTelemetry() {
+    if (!_initialized || !_listener_active || _telemetry_flags == TELEMETRY_NONE) {
+        return;
+    }
+
+    SystemTelemetry tel;
+    collectTelemetry(tel);
+
+    sendLogMessage(LOG_TYPE_TELEMETRY, (uint8_t*)&tel, sizeof(tel));
+}
+
+void ESPIoTLog::loop() {
+    if (!_initialized) return;
+
+    uint32_t now = millis();
+
+    // Periodic discovery
+    if (now - _last_discovery >= _discovery_interval) {
+        discoverListener();
+        _last_discovery = now;
+    }
+
+    // Periodic telemetry
+    if (_listener_active && _telemetry_flags != TELEMETRY_NONE &&
+        (now - _last_telemetry >= TELEMETRY_INTERVAL)) {
+        sendTelemetry();
+        _last_telemetry = now;
+    }
+}
+
+bool ESPIoTLog::discoverListener() {
+    // Query for the logging service
+    int n = MDNS.queryService("esp-iot-log", "udp");
+
+    bool found = (n > 0);
+
+    if (found != _listener_active) {
+        _listener_active = found;
+        if (found) {
+            info("Log listener discovered - logging enabled");
+        } else {
+            info("No log listeners found - network logging disabled");
+        }
+    }
+
+    return found;
+}
+
+bool ESPIoTLog::sendLogMessage(log_type_t type, const uint8_t* data, size_t length) {
+    if (!_initialized || !_listener_active) {
+        _dropped_count++;
+        return false;
+    }
+
+    // Prepare header
+    LogHeader header;
+    header.magic = LOG_MAGIC;
+    header.version = PROTOCOL_VERSION;
+    header.device_id = _device_id;
+    header.timestamp = millis();
+    header.log_type = type;
+    header.length = length;
+
+    // Calculate total packet size
+    size_t total_size = sizeof(header) + length + 2; // +2 for CRC16
+    if (total_size > 1024) { // Reasonable UDP limit
+        _dropped_count++;
+        return false;
+    }
+
+    // Create packet
+    uint8_t packet[1024];
+    memcpy(packet, &header, sizeof(header));
+    if (length > 0) {
+        memcpy(packet + sizeof(header), data, length);
+    }
+
+    // Calculate and append checksum
+    uint16_t checksum = calculateChecksum(packet, sizeof(header) + length);
+    memcpy(packet + sizeof(header) + length, &checksum, sizeof(checksum));
+
+    // Send UDP packet
+    _udp.beginPacket(_multicast_addr, _multicast_port);
+    size_t sent = _udp.write(packet, total_size);
+    bool success = _udp.endPacket();
+
+    if (success && sent == total_size) {
+        _log_count++;
+        return true;
+    } else {
+        _dropped_count++;
+        return false;
+    }
+}
+
+void ESPIoTLog::formatLogMessage(log_level_t level, const char* message) {
+    if (!_listener_active) return;
+
+    // Create text log payload: level(1) + message
+    size_t msg_len = strlen(message);
+    if (msg_len > DEFAULT_MAX_MESSAGE_SIZE - 1) {
+        msg_len = DEFAULT_MAX_MESSAGE_SIZE - 1;
+    }
+
+    uint8_t payload[DEFAULT_MAX_MESSAGE_SIZE + 1];
+    payload[0] = (uint8_t)level;
+    memcpy(payload + 1, message, msg_len);
+
+    sendLogMessage(LOG_TYPE_TEXT, payload, 1 + msg_len);
+}
+
+void ESPIoTLog::collectTelemetry(SystemTelemetry& tel) {
+    memset(&tel, 0, sizeof(tel));
+
+    if (_telemetry_flags & TELEMETRY_HEAP) {
+        tel.heap_free = ESP.getFreeHeap();
+#ifdef ESP32
+        tel.heap_largest_block = ESP.getMaxAllocHeap();
+        tel.heap_fragmentation = 100 - (tel.heap_largest_block * 100 / tel.heap_free);
+#else
+        tel.heap_largest_block = 0; // Not available on ESP8266
+        tel.heap_fragmentation = 0;
+#endif
+    }
+
+    if (_telemetry_flags & TELEMETRY_WIFI) {
+        tel.wifi_rssi = WiFi.RSSI();
+        tel.wifi_status = WiFi.status();
+        // Note: reconnect count would need custom tracking
+        tel.wifi_reconnects = 0;
+    }
+
+    if (_telemetry_flags & TELEMETRY_TEMPERATURE) {
+#ifdef ESP32
+        tel.temperature = (int16_t)(temperatureRead() * 10); // Celsius * 10
+#else
+        tel.temperature = 0; // Not available on ESP8266
+#endif
+    }
+
+    if (_telemetry_flags & TELEMETRY_RESET) {
+#ifdef ESP32
+        tel.reset_reason = esp_reset_reason();
+#else
+        tel.reset_reason = ESP.getResetInfoPtr()->reason;
+#endif
+    }
+
+    if (_telemetry_flags & TELEMETRY_STACK) {
+#ifdef ESP32
+        tel.free_stack = uxTaskGetStackHighWaterMark(NULL);
+#else
+        tel.free_stack = 0; // Not easily available on ESP8266
+#endif
+    }
+
+    tel.uptime = millis();
+}
+
+uint64_t ESPIoTLog::getDeviceId() {
+#ifdef ESP32
+    return ESP.getEfuseMac();
+#else
+    return ESP.getChipId(); // 32-bit on ESP8266, extend to 64-bit
+#endif
+}
+
+uint16_t ESPIoTLog::calculateChecksum(const uint8_t* data, size_t length) {
+    // Simple CRC16-CCITT
+    uint16_t crc = 0xFFFF;
+    for (size_t i = 0; i < length; i++) {
+        crc ^= (uint16_t)data[i] << 8;
+        for (uint8_t j = 0; j < 8; j++) {
+            if (crc & 0x8000) {
+                crc = (crc << 1) ^ 0x1021;
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+    return crc;
+}
+
+void ESPIoTLog::enableCrashLogging(bool enable) {
+    _crash_logging_enabled = enable;
+
+    if (enable) {
+        ESPCrashHandler::install();
+        info("Crash logging enabled");
+    } else {
+        ESPCrashHandler::uninstall();
+        info("Crash logging disabled");
+    }
+}
+
+void ESPIoTLog::checkAndLogCrashes() {
+    if (!_initialized || !_crash_logging_enabled) return;
+
+    if (ESPCrashHandler::hasCrashData()) {
+        CrashData crash;
+        if (ESPCrashHandler::getCrashData(crash)) {
+            error("Previous crash detected: type=%d, reason=%d, heap=%dKB, uptime=%lums, function=%s",
+                  crash.crash_type, crash.reset_reason, crash.heap_free,
+                  crash.timestamp, crash.last_function[0] ? crash.last_function : "unknown");
+
+            // Send crash data if listener is active
+            if (_listener_active) {
+                sendLogMessage(LOG_TYPE_EXCEPTION, (uint8_t*)&crash, sizeof(crash));
+            }
+
+            uint32_t total_crashes = ESPCrashHandler::getCrashCount();
+            if (total_crashes > 1) {
+                warn("Total crash count: %lu", total_crashes);
+            }
+        }
+
+        // Clear crash data after logging
+        ESPCrashHandler::clearCrashData();
+    }
+}
+
+void ESPIoTLog::logCrash(const char* reason) {
+    if (!_initialized) return;
+
+    error("Manual crash report: %s", reason);
+
+    if (_crash_logging_enabled) {
+        ESPCrashHandler::recordCrash(CRASH_TYPE_UNKNOWN, reason);
+    }
+}

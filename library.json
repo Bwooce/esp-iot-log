@@ -1,0 +1,81 @@
+{
+  "name": "ESP IoT Log",
+  "version": "1.0.0",
+  "description": "Efficient multicast logging for ESP32/ESP8266 with mDNS discovery. Includes ESP-specific telemetry, system health monitoring, crash logging, and cross-platform log receiver. Zero overhead when no listeners are present.",
+  "keywords": [
+    "esp32",
+    "esp8266",
+    "logging",
+    "iot",
+    "telemetry",
+    "multicast",
+    "mdns",
+    "crash",
+    "monitoring",
+    "debugging",
+    "wifi",
+    "udp"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/esp-iot-log.git"
+  },
+  "authors": [
+    {
+      "name": "Bruce Fitzsimons",
+      "email": "bruce@fitzsimons.org",
+      "maintainer": true
+    }
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/your-username/esp-iot-log",
+  "dependencies": {
+    "ESPmDNS": "^2.0.0",
+    "WiFi": "*"
+  },
+  "frameworks": [
+    "arduino",
+    "espidf"
+  ],
+  "platforms": [
+    "espressif32",
+    "espressif8266"
+  ],
+  "build": {
+    "includeDir": "src",
+    "srcDir": "src"
+  },
+  "export": {
+    "include": [
+      "src/*",
+      "examples/*",
+      "python/*",
+      "README.md",
+      "LICENSE",
+      "library.properties"
+    ]
+  },
+  "examples": [
+    {
+      "name": "BasicLogging",
+      "base": "examples/BasicLogging",
+      "files": [
+        "BasicLogging.ino"
+      ]
+    },
+    {
+      "name": "AdvancedFeatures",
+      "base": "examples/AdvancedFeatures",
+      "files": [
+        "AdvancedFeatures.ino"
+      ]
+    },
+    {
+      "name": "StressTest",
+      "base": "examples/StressTest",
+      "files": [
+        "StressTest.ino"
+      ]
+    }
+  ]
+}
