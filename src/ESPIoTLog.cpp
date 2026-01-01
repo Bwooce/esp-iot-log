@@ -20,12 +20,13 @@ ESPIoTLog::ESPIoTLog() :
     _log_level(LOG_LEVEL_INFO),
     _log_mask(LOG_MASK_ALL),
     _serial_enabled(true),
-    _discovery_interval(DEFAULT_DISCOVERY_INTERVAL),
+    _discovery_interval(DISCOVERY_MIN_INTERVAL),
     _telemetry_flags(TELEMETRY_NONE),
     _initialized(false),
     _listener_active(false),
     _crash_logging_enabled(false),
     _last_discovery(0),
+    _current_discovery_interval(DISCOVERY_INITIAL_INTERVAL),
     _last_telemetry(0),
     _log_count(0),
     _dropped_count(0),
@@ -263,7 +264,8 @@ void ESPIoTLog::logMetric(const char* name, const char* value) {
 }
 
 void ESPIoTLog::forceDiscovery() {
-    _last_discovery = 0; // Force immediate discovery
+    _last_discovery = 0;  // Force immediate discovery
+    _current_discovery_interval = DISCOVERY_INITIAL_INTERVAL;  // Reset backoff
 }
 
 void ESPIoTLog::sendTelemetry() {
@@ -282,10 +284,25 @@ void ESPIoTLog::loop() {
 
     uint32_t now = millis();
 
-    // Periodic discovery
-    if (now - _last_discovery >= _discovery_interval) {
-        discoverListener();
+    // Periodic discovery with exponential backoff
+    if (now - _last_discovery >= _current_discovery_interval) {
+        bool found = discoverListener();
         _last_discovery = now;
+
+        if (found) {
+            // Listener found - reset to minimum interval
+            _current_discovery_interval = DISCOVERY_MIN_INTERVAL;
+        } else {
+            // No listener - exponential backoff up to max
+            _current_discovery_interval = min(
+                _current_discovery_interval * DISCOVERY_BACKOFF_MULTIPLIER,
+                (uint32_t)DISCOVERY_MAX_INTERVAL
+            );
+            // Ensure we don't go below minimum
+            if (_current_discovery_interval < DISCOVERY_MIN_INTERVAL) {
+                _current_discovery_interval = DISCOVERY_MIN_INTERVAL;
+            }
+        }
     }
 
     // Periodic telemetry

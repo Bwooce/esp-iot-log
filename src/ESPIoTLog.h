@@ -43,7 +43,23 @@
 #define DEFAULT_MULTICAST_IP "239.255.1.100"
 #define DEFAULT_MULTICAST_PORT 4210
 #define DEFAULT_SERVICE_NAME "_esp-iot-log._udp.local"
-#define DEFAULT_DISCOVERY_INTERVAL 10000  // 10 seconds
+
+// Discovery interval with exponential backoff (configurable via #defines before including)
+#ifndef DISCOVERY_INITIAL_INTERVAL
+#define DISCOVERY_INITIAL_INTERVAL 0         // Start immediately on boot
+#endif
+#ifndef DISCOVERY_MIN_INTERVAL
+#define DISCOVERY_MIN_INTERVAL 10000         // 10 seconds minimum
+#endif
+#ifndef DISCOVERY_MAX_INTERVAL
+#define DISCOVERY_MAX_INTERVAL 300000        // 300 seconds (5 min) maximum
+#endif
+#ifndef DISCOVERY_BACKOFF_MULTIPLIER
+#define DISCOVERY_BACKOFF_MULTIPLIER 2       // Double each time
+#endif
+
+// Legacy define for backwards compatibility
+#define DEFAULT_DISCOVERY_INTERVAL DISCOVERY_MIN_INTERVAL
 
 // Platform-specific buffer sizes
 #ifdef ESP8266
@@ -247,6 +263,7 @@ private:
     bool _listener_active;
     bool _crash_logging_enabled;
     uint32_t _last_discovery;
+    uint32_t _current_discovery_interval;  // Current interval (exponential backoff)
     uint32_t _last_telemetry;
     uint32_t _log_count;
     uint32_t _dropped_count;

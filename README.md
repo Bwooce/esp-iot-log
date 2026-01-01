@@ -364,8 +364,25 @@ iotlog.logStartupInfo();
 - **ESP32**: ~9KB flash, ~2KB RAM (with ESP-IDF features)
 - **ESP8266**: ~7KB flash, ~1.5KB RAM (optimized buffers)
 - **Log buffer**: 512 bytes (ESP32), 256 bytes (ESP8266)
+- **Crash handler**: 85 bytes RTC memory (stores crash data across resets)
 - **Zero allocation**: When no listeners detected
 - **Serial output**: Optional (can be disabled to reduce overhead)
+
+### Discovery Backoff
+mDNS discovery uses exponential backoff to minimize overhead when no listeners are present:
+- **Initial**: Immediate discovery on boot
+- **Minimum interval**: 10 seconds (when listener active)
+- **Maximum interval**: 300 seconds (5 minutes, when no listener)
+- **Backoff multiplier**: 2x per failed discovery
+
+Configure via defines before including the header:
+```cpp
+#define DISCOVERY_INITIAL_INTERVAL 0       // Start immediately
+#define DISCOVERY_MIN_INTERVAL 10000       // 10 seconds
+#define DISCOVERY_MAX_INTERVAL 300000      // 5 minutes
+#define DISCOVERY_BACKOFF_MULTIPLIER 2
+#include <ESPIoTLog.h>
+```
 
 ### Network Performance
 - **Message rate**: 50-100 messages/second typical
