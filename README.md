@@ -146,18 +146,28 @@ LOG_INFO("Status update");
 ### System Telemetry
 
 ```cpp
-// Enable telemetry categories
+// Enable basic telemetry categories
 iotlog.enableSystemTelemetry(
     TELEMETRY_HEAP |        // Memory usage, fragmentation
     TELEMETRY_WIFI |        // Signal strength, connection state
     TELEMETRY_TEMPERATURE | // Core temperature (ESP32)
     TELEMETRY_STACK |       // Stack high water marks
     TELEMETRY_RESET |       // Reset reasons, boot counts
-    TELEMETRY_ALL          // Everything
+
+    // ESP-IDF Advanced Features (ESP32 only)
+    TELEMETRY_ADVANCED_HEAP |    // Per-capability heap (Internal/PSRAM/DMA)
+    TELEMETRY_TASK_INFO |        // FreeRTOS task monitoring
+    TELEMETRY_WIFI_ADVANCED |    // Channel, bandwidth, TX power
+    TELEMETRY_CHIP_INFO |        // Hardware details (startup only)
+
+    TELEMETRY_ALL               // Everything
 );
 
 // Manual telemetry transmission
 iotlog.sendTelemetry();
+
+// One-time hardware logging (ESP32)
+iotlog.logStartupInfo();
 ```
 
 ### Custom Metrics
@@ -302,16 +312,59 @@ Serial.printf("Sent: %lu, Dropped: %lu\n",
               iotlog.getLogCount(), iotlog.getDroppedCount());
 ```
 
+## ESP-IDF Rich Debugging Features
+
+### Advanced Memory Monitoring (ESP32)
+```cpp
+// Enable per-capability heap analysis
+iotlog.enableSystemTelemetry(TELEMETRY_ADVANCED_HEAP);
+```
+- **Internal RAM**: Available/largest block for general allocation
+- **PSRAM**: External SPI RAM usage (if available)
+- **DMA Memory**: DMA-capable memory pool status
+- **Memory Efficiency**: Real-time fragmentation analysis
+
+### FreeRTOS Task Analysis (ESP32)
+```cpp
+// Enable task monitoring with stack analysis
+iotlog.enableSystemTelemetry(TELEMETRY_TASK_INFO);
+```
+- **Task Count**: Active FreeRTOS tasks
+- **Critical Task Detection**: Identifies task with lowest stack remaining
+- **Stack High Water Marks**: Per-task stack usage analysis
+- **Memory Leak Detection**: Task-based heap allocation tracking
+
+### Advanced WiFi Diagnostics (ESP32)
+```cpp
+// Enable detailed WiFi telemetry
+iotlog.enableSystemTelemetry(TELEMETRY_WIFI_ADVANCED);
+```
+- **Channel Information**: WiFi channel and bandwidth (20/40MHz)
+- **TX Power**: Actual transmission power levels
+- **PHY Details**: 802.11 mode and capabilities
+- **Country Configuration**: Regulatory domain settings
+
+### Hardware Security Status (ESP32)
+```cpp
+// One-time hardware logging at startup
+iotlog.logStartupInfo();
+```
+- **Chip Model Detection**: ESP32/S2/S3/C3/C6/H2 identification
+- **Security Features**: Secure Boot and Flash Encryption status
+- **Flash Configuration**: Size, mode, and speed detection
+- **Hardware Capabilities**: Cores, WiFi, Bluetooth features
+
 ## Performance Characteristics
 
 ### Memory Usage
-- **Library overhead**: ~8KB flash, ~2KB RAM
+- **Library overhead**: ~9KB flash, ~2KB RAM (with ESP-IDF features)
 - **Log buffer**: 512 bytes (configurable)
 - **Zero allocation**: When no listeners detected
+- **Advanced telemetry**: +1KB overhead when enabled
 
 ### Network Performance
 - **Message rate**: 50-100 messages/second typical
-- **Bandwidth**: ~100 bytes per text log message
+- **Bandwidth**: ~100 bytes per text log, ~150 bytes per rich telemetry
 - **Latency**: <10ms from log call to network transmission
 
 ### Power Consumption
@@ -323,10 +376,18 @@ Serial.printf("Sent: %lu, Dropped: %lu\n",
 
 | Feature | ESP32 | ESP8266 |
 |---------|-------|---------|
+| **Basic Features** | | |
 | Core Temperature | ✓ Available | ✗ Not available |
 | Heap Fragmentation | ✓ Detailed stats | ✗ Basic only |
 | Stack Monitoring | ✓ FreeRTOS support | ✗ Limited |
 | Crash Handling | ✓ Full exception hooks | ✓ Basic reset info |
+| **ESP-IDF Advanced** | | |
+| Per-Capability Heap | ✓ Internal/PSRAM/DMA | ✗ Not supported |
+| Task Analysis | ✓ Full FreeRTOS monitoring | ✗ Not supported |
+| Advanced WiFi | ✓ Channel/bandwidth/power | ✗ Not supported |
+| Hardware Security | ✓ SecureBoot/FlashEnc detect | ✗ Not supported |
+| Chip Identification | ✓ Full model detection | ✗ Basic chip ID only |
+| **General** | | |
 | PSRAM Support | ✓ If available | ✗ Not supported |
 | Performance | Higher throughput | Lower but adequate |
 

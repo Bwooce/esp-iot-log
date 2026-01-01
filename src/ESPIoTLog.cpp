@@ -404,6 +404,169 @@ void ESPIoTLog::collectTelemetry(SystemTelemetry& tel) {
     }
 
     tel.uptime = millis();
+
+#ifdef ESP32
+    // ESP-IDF Advanced telemetry collection
+    if (_telemetry_flags & TELEMETRY_ADVANCED_HEAP) {
+        collectAdvancedHeap(tel);
+    }
+
+    if (_telemetry_flags & TELEMETRY_TASK_INFO) {
+        collectTaskInfo(tel);
+    }
+
+    if (_telemetry_flags & TELEMETRY_WIFI_ADVANCED) {
+        collectAdvancedWiFi(tel);
+    }
+
+    if (_telemetry_flags & TELEMETRY_CHIP_INFO) {
+        collectChipInfo(tel);
+    }
+#endif
+}
+
+#ifdef ESP32
+void ESPIoTLog::collectAdvancedHeap(SystemTelemetry& tel) {
+    // Per-capability heap information
+    tel.advanced.internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    tel.advanced.internal_largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+
+    // External PSRAM (if available)
+    tel.advanced.external_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    tel.advanced.external_largest = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+
+    // DMA-capable memory
+    tel.advanced.dma_free = heap_caps_get_free_size(MALLOC_CAP_DMA);
+}
+
+void ESPIoTLog::collectTaskInfo(SystemTelemetry& tel) {
+    UBaseType_t task_count = uxTaskGetNumberOfTasks();
+    tel.advanced.task_count = task_count < 255 ? (uint8_t)task_count : 255;
+
+    // Find task with minimum stack remaining
+    TaskStatus_t* task_array = (TaskStatus_t*)malloc(task_count * sizeof(TaskStatus_t));
+    if (task_array) {
+        UBaseType_t actual_count = uxTaskGetSystemState(task_array, task_count, NULL);
+
+        uint32_t min_stack = UINT32_MAX;
+        const char* critical_task_name = "unknown";
+
+        for (UBaseType_t i = 0; i < actual_count; i++) {
+            if (task_array[i].usStackHighWaterMark < min_stack) {
+                min_stack = task_array[i].usStackHighWaterMark;
+                critical_task_name = task_array[i].pcTaskName;
+            }
+        }
+
+        tel.advanced.min_stack_remaining = min_stack < 65535 ? (uint16_t)min_stack : 65535;
+        strncpy(tel.advanced.critical_task, critical_task_name, sizeof(tel.advanced.critical_task) - 1);
+        tel.advanced.critical_task[sizeof(tel.advanced.critical_task) - 1] = '\0';
+
+        free(task_array);
+    }
+}
+
+void ESPIoTLog::collectAdvancedWiFi(SystemTelemetry& tel) {
+    if (WiFi.isConnected()) {
+        wifi_ap_record_t ap_info;
+        if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+            tel.wifi_advanced.channel = ap_info.primary;
+        }
+
+        // Get WiFi bandwidth
+        wifi_bandwidth_t bw;
+        if (esp_wifi_get_bandwidth(WIFI_IF_STA, &bw) == ESP_OK) {
+            tel.wifi_advanced.bandwidth = (bw == WIFI_BW_HT40) ? 40 : 20;
+        }
+
+        // Get TX power
+        int8_t power;
+        if (esp_wifi_get_max_tx_power(&power) == ESP_OK) {
+            tel.wifi_advanced.tx_power = power;
+        }
+
+        // Get country code
+        wifi_country_t country;
+        if (esp_wifi_get_country(&country) == ESP_OK) {
+            memcpy(tel.wifi_advanced.country_code, country.cc, sizeof(country.cc));
+            tel.wifi_advanced.country_code[sizeof(country.cc)] = '\0';
+        }
+    }
+}
+
+void ESPIoTLog::collectChipInfo(SystemTelemetry& tel) {
+    esp_chip_info_t chip_info;
+    esp_chip_info(&chip_info);
+
+    tel.chip_info.chip_model = chip_info.model;
+    tel.chip_info.chip_cores = chip_info.cores;
+    tel.chip_info.chip_revision = chip_info.revision;
+
+    // Flash information
+    uint32_t flash_size;
+    if (esp_flash_get_size(NULL, &flash_size) == ESP_OK) {
+        tel.chip_info.flash_size = flash_size;
+    }
+
+    tel.chip_info.cpu_freq_mhz = ESP.getCpuFreqMHz();
+
+    // Security features (if available)
+#ifdef CONFIG_SECURE_BOOT_ENABLED
+    tel.chip_info.secure_boot = esp_secure_boot_enabled();
+#else
+    tel.chip_info.secure_boot = false;
+#endif
+
+#ifdef CONFIG_FLASH_ENCRYPTION_ENABLED
+    tel.chip_info.flash_encryption = esp_flash_encryption_enabled();
+#else
+    tel.chip_info.flash_encryption = false;
+#endif
+}
+#endif
+
+void ESPIoTLog::logStartupInfo() {
+    if (!_initialized || !_listener_active) return;
+
+#ifdef ESP32
+    if (_telemetry_flags & TELEMETRY_CHIP_INFO) {
+        esp_chip_info_t chip_info;
+        esp_chip_info(&chip_info);
+
+        const char* chip_name;
+        switch(chip_info.model) {
+            case CHIP_ESP32: chip_name = "ESP32"; break;
+            case CHIP_ESP32S2: chip_name = "ESP32-S2"; break;
+            case CHIP_ESP32S3: chip_name = "ESP32-S3"; break;
+            case CHIP_ESP32C3: chip_name = "ESP32-C3"; break;
+            case CHIP_ESP32C2: chip_name = "ESP32-C2"; break;
+            case CHIP_ESP32C6: chip_name = "ESP32-C6"; break;
+            case CHIP_ESP32H2: chip_name = "ESP32-H2"; break;
+            default: chip_name = "Unknown ESP32"; break;
+        }
+
+        info("=== ESP32 Hardware Information ===");
+        info("Chip: %s (Rev %d.%d)", chip_name, chip_info.revision / 100, chip_info.revision % 100);
+        info("Cores: %d", chip_info.cores);
+        info("Features: WiFi%s%s",
+             (chip_info.features & CHIP_FEATURE_BT) ? "+BT" : "",
+             (chip_info.features & CHIP_FEATURE_BLE) ? "+BLE" : "");
+
+        uint32_t flash_size;
+        if (esp_flash_get_size(NULL, &flash_size) == ESP_OK) {
+            info("Flash: %lu MB", flash_size / (1024 * 1024));
+        }
+
+        info("CPU Frequency: %lu MHz", ESP.getCpuFreqMHz());
+
+        // PSRAM info
+        if (chip_info.features & CHIP_FEATURE_EMB_PSRAM) {
+            info("PSRAM: %lu KB", ESP.getPsramSize() / 1024);
+        }
+
+        info("==================================");
+    }
+#endif
 }
 
 uint64_t ESPIoTLog::getDeviceId() {

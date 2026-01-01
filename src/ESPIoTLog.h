@@ -17,6 +17,17 @@
   #include <ESPmDNS.h>
   #include <esp_system.h>
   #include <esp_heap_caps.h>
+  // ESP-IDF Rich Debugging
+  #include <esp_chip_info.h>
+  #include <esp_flash.h>
+  #include <esp_wifi.h>
+  #include <freertos/task.h>
+  #ifdef CONFIG_SECURE_BOOT_ENABLED
+    #include <esp_secure_boot.h>
+  #endif
+  #ifdef CONFIG_FLASH_ENCRYPTION_ENABLED
+    #include <esp_flash_encrypt.h>
+  #endif
 #elif defined(ESP8266)
   #include <ESP8266WiFi.h>
   #include <WiFiUdp.h>
@@ -64,7 +75,12 @@ typedef enum {
     TELEMETRY_STACK = 1 << 3,
     TELEMETRY_FLASH = 1 << 4,
     TELEMETRY_RESET = 1 << 5,
-    TELEMETRY_ALL = 0xFF
+    // ESP-IDF Rich Debugging (optional)
+    TELEMETRY_ADVANCED_HEAP = 1 << 6,    // Per-capability heap breakdown
+    TELEMETRY_TASK_INFO = 1 << 7,        // FreeRTOS task monitoring
+    TELEMETRY_WIFI_ADVANCED = 1 << 8,    // Detailed WiFi diagnostics
+    TELEMETRY_CHIP_INFO = 1 << 9,        // Hardware details (startup only)
+    TELEMETRY_ALL = 0x3FF
 } telemetry_flags_t;
 
 // Log message types
@@ -87,6 +103,7 @@ struct __attribute__((packed)) LogHeader {
 
 // System telemetry data
 struct SystemTelemetry {
+    // Basic telemetry
     uint32_t heap_free;
     uint32_t heap_largest_block;
     uint8_t heap_fragmentation;
@@ -97,6 +114,38 @@ struct SystemTelemetry {
     uint8_t reset_reason;
     uint32_t uptime;
     uint16_t free_stack;
+
+    // ESP-IDF Advanced telemetry (optional)
+    struct {
+        uint32_t internal_free;
+        uint32_t internal_largest;
+        uint32_t external_free;     // PSRAM
+        uint32_t external_largest;
+        uint32_t dma_free;
+        uint8_t task_count;
+        uint16_t min_stack_remaining;
+        char critical_task[16];     // Task with lowest stack
+    } advanced;
+
+    struct {
+        uint8_t channel;
+        int8_t tx_power;
+        uint8_t bandwidth;          // 20/40MHz
+        uint16_t beacon_timeout;
+        uint8_t phy_mode;
+        char country_code[4];
+    } wifi_advanced;
+
+    struct {
+        uint8_t chip_model;
+        uint8_t chip_cores;
+        uint8_t chip_revision;
+        uint32_t flash_size;
+        uint8_t flash_mode;
+        uint32_t cpu_freq_mhz;
+        bool secure_boot;
+        bool flash_encryption;
+    } chip_info;
 };
 
 class ESPIoTLog {
@@ -145,6 +194,9 @@ public:
     void checkAndLogCrashes();
     void logCrash(const char* reason);
 
+    // ESP-IDF Rich debugging (one-time startup logging)
+    void logStartupInfo();
+
     // Task loop (call from main loop)
     void loop();
 
@@ -156,6 +208,14 @@ private:
     void collectTelemetry(SystemTelemetry& tel);
     uint64_t getDeviceId();
     uint16_t calculateChecksum(const uint8_t* data, size_t length);
+
+    // ESP-IDF Advanced telemetry collection
+#ifdef ESP32
+    void collectAdvancedHeap(SystemTelemetry& tel);
+    void collectTaskInfo(SystemTelemetry& tel);
+    void collectAdvancedWiFi(SystemTelemetry& tel);
+    void collectChipInfo(SystemTelemetry& tel);
+#endif
 
     // State management
     void resetDiscovery();

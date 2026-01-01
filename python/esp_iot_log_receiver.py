@@ -81,7 +81,8 @@ class LogMessage:
                     self.parsed_payload = {'level': level, 'message': message}
 
             elif self.log_type == LOG_TYPE_TELEMETRY:
-                if len(self.payload) >= 24:  # Size of SystemTelemetry struct
+                if len(self.payload) >= 24:  # Minimum size of SystemTelemetry struct
+                    # Basic telemetry (first 24 bytes)
                     tel = struct.unpack('<IIBBBHHBII H', self.payload[:24])
                     self.parsed_payload = {
                         'heap_free': tel[0],
@@ -95,6 +96,49 @@ class LogMessage:
                         'uptime': tel[8],
                         'free_stack': tel[9]
                     }
+
+                    # ESP-IDF Advanced telemetry (if present)
+                    if len(self.payload) >= 100:  # Extended telemetry size
+                        try:
+                            # Advanced heap (40 bytes)
+                            advanced = struct.unpack('<IIIIIIBH16s', self.payload[24:67])
+                            self.parsed_payload['advanced'] = {
+                                'internal_free': advanced[0],
+                                'internal_largest': advanced[1],
+                                'external_free': advanced[2],
+                                'external_largest': advanced[3],
+                                'dma_free': advanced[4],
+                                'task_count': advanced[5],
+                                'min_stack_remaining': advanced[6],
+                                'critical_task': advanced[7].decode('utf-8', errors='replace').rstrip('\x00')
+                            }
+
+                            # WiFi advanced (16 bytes)
+                            wifi_adv = struct.unpack('<BbBHB4s', self.payload[67:83])
+                            self.parsed_payload['wifi_advanced'] = {
+                                'channel': wifi_adv[0],
+                                'tx_power': wifi_adv[1],
+                                'bandwidth': wifi_adv[2],
+                                'beacon_timeout': wifi_adv[3],
+                                'phy_mode': wifi_adv[4],
+                                'country_code': wifi_adv[5].decode('utf-8', errors='replace').rstrip('\x00')
+                            }
+
+                            # Chip info (16 bytes)
+                            chip = struct.unpack('<BBBIBIBB', self.payload[83:99])
+                            self.parsed_payload['chip_info'] = {
+                                'model': chip[0],
+                                'cores': chip[1],
+                                'revision': chip[2],
+                                'flash_size': chip[3],
+                                'flash_mode': chip[4],
+                                'cpu_freq_mhz': chip[5],
+                                'secure_boot': bool(chip[6]),
+                                'flash_encryption': bool(chip[7])
+                            }
+                        except Exception as e:
+                            # If advanced parsing fails, continue with basic telemetry
+                            pass
 
             elif self.log_type == LOG_TYPE_EXCEPTION:
                 if len(self.payload) >= 72:  # Size of CrashData struct
@@ -179,13 +223,38 @@ class LogMessage:
             temp_str = f"{tel['temperature']:.1f}°C" if tel['temperature'] is not None else "N/A"
             wifi_str = f"{tel['wifi_rssi']}dBm" if tel['wifi_rssi'] is not None else "N/A"
 
-            return (f"{Colors.TIMESTAMP}{received}{Colors.RESET} "
-                   f"{Colors.DEVICE}{device_short}{Colors.RESET} "
-                   f"[{timestamp}] "
-                   f"{Colors.INFO}[TELEMETRY]{Colors.RESET} "
-                   f"Heap: {tel['heap_free']}B (frag: {tel['heap_fragmentation']}%), "
-                   f"WiFi: {wifi_str}, Temp: {temp_str}, "
-                   f"Stack: {tel['free_stack']}B, Uptime: {tel['uptime']/1000:.1f}s")
+            # Basic telemetry
+            result = (f"{Colors.TIMESTAMP}{received}{Colors.RESET} "
+                     f"{Colors.DEVICE}{device_short}{Colors.RESET} "
+                     f"[{timestamp}] "
+                     f"{Colors.INFO}[TELEMETRY]{Colors.RESET} "
+                     f"Heap: {tel['heap_free']}B (frag: {tel['heap_fragmentation']}%), "
+                     f"WiFi: {wifi_str}, Temp: {temp_str}, "
+                     f"Stack: {tel['free_stack']}B, Uptime: {tel['uptime']/1000:.1f}s")
+
+            # ESP-IDF Advanced telemetry (if present)
+            if 'advanced' in tel:
+                adv = tel['advanced']
+                result += f"\n                    Advanced: Internal: {adv['internal_free']}B, "
+                if adv['external_free'] > 0:
+                    result += f"PSRAM: {adv['external_free']}B, "
+                result += f"Tasks: {adv['task_count']}, Critical: {adv['critical_task']}({adv['min_stack_remaining']}B)"
+
+            if 'wifi_advanced' in tel:
+                wifi_adv = tel['wifi_advanced']
+                if wifi_adv['channel'] > 0:
+                    result += f"\n                    WiFi: Ch{wifi_adv['channel']}, {wifi_adv['bandwidth']}MHz, {wifi_adv['tx_power']}dBm, {wifi_adv['country_code']}"
+
+            if 'chip_info' in tel:
+                chip = tel['chip_info']
+                security = ""
+                if chip['secure_boot']:
+                    security += "+SecureBoot"
+                if chip['flash_encryption']:
+                    security += "+FlashEnc"
+                result += f"\n                    Chip: Model{chip['model']}, {chip['cores']} cores, Rev{chip['revision']}, Flash:{chip['flash_size']//1024//1024}MB{security}"
+
+            return result
 
         elif self.log_type == LOG_TYPE_EXCEPTION and self.parsed_payload:
             crash = self.parsed_payload
