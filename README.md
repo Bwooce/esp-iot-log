@@ -28,6 +28,13 @@ A lightweight, efficient logging library for ESP32 and ESP8266 that uses mDNS di
 - **CRC16 Checksums**: Data integrity verification
 - **Batched Transmission**: Reduces network overhead and improves performance
 
+### ⚡ Production-Ready Features
+- **Rate Limiting**: Prevents log flooding (100 logs/second default, configurable)
+- **Thread Safety**: Optional ESP32 FreeRTOS multi-task support (opt-in via define)
+- **Power Management**: Sleep/wake callbacks for battery-powered devices
+- **Input Validation**: NULL checks and bounds validation on all public APIs
+- **Configurable**: All features customizable via #defines before including header
+
 ### 🛠️ Developer Friendly
 - **Arduino Library**: Standard installation via Library Manager
 - **Cross-Platform Receiver**: Python script works on Windows, macOS, Linux
@@ -127,6 +134,44 @@ iotlog.setLogMask(LOG_MASK_ALL);                    // All levels (default)
 // Optional serial output control (reduces overhead when not needed)
 iotlog.setSerialEnabled(false);                     // Disable serial logging
 iotlog.setSerialEnabled(true);                      // Enable serial logging (default)
+```
+
+### Advanced Configuration
+
+```cpp
+// Rate Limiting (enabled by default - prevents log flooding)
+// Configure before including header:
+#define IOTLOG_RATE_LIMIT_ENABLED 1      // Enable rate limiting (default)
+#define IOTLOG_MAX_LOGS_PER_SECOND 100   // Max logs/second (default: 100)
+#include <ESPIoTLog.h>
+
+// Disable rate limiting if needed:
+#define IOTLOG_RATE_LIMIT_ENABLED 0
+#include <ESPIoTLog.h>
+
+// Reset rate limiter counters manually:
+iotlog.resetRateLimit();
+
+// Thread Safety (opt-in for FreeRTOS multi-task scenarios)
+// Note: Adds ~200-500 bytes RAM + CPU overhead. Only enable if needed!
+#define IOTLOG_THREAD_SAFE 1             // Enable thread safety (default: 0)
+#include <ESPIoTLog.h>
+
+// Power Management (for battery-powered devices)
+// Set callbacks to suspend/resume logging around sleep operations:
+iotlog.onBeforeSleep = []() {
+    iotlog.info("Entering sleep mode");
+    // Optionally disable features here
+};
+
+iotlog.onAfterWake = []() {
+    iotlog.info("Woke from sleep");
+    // Re-enable features if needed
+};
+
+// Before going to sleep:
+if (iotlog.onBeforeSleep) iotlog.onBeforeSleep();
+esp_deep_sleep_start();
 ```
 
 ### Logging Methods
@@ -364,7 +409,11 @@ iotlog.logStartupInfo();
 - **ESP32**: ~9KB flash, ~2KB RAM (with ESP-IDF features)
 - **ESP8266**: ~7KB flash, ~1.5KB RAM (optimized buffers)
 - **Log buffer**: 512 bytes (ESP32), 256 bytes (ESP8266)
+  - *Rationale*: ESP8266 has ~50KB usable RAM vs ESP32's ~300KB, buffers halved accordingly
 - **Crash handler**: 85 bytes RTC memory (stores crash data across resets)
+- **Rate limiting**: +16 bytes RAM (ESP8266), +12 bytes RAM (ESP32) - enabled by default
+- **Thread safety**: +8 bytes RAM (ESP32 only) - disabled by default, opt-in via define
+- **Power callbacks**: +8 bytes RAM - always available
 - **Zero allocation**: When no listeners detected
 - **Serial output**: Optional (can be disabled to reduce overhead)
 
@@ -385,14 +434,16 @@ Configure via defines before including the header:
 ```
 
 ### Network Performance
-- **Message rate**: 50-100 messages/second typical
+- **Message rate**: 50-100 messages/second typical (rate limited to 100/sec by default)
 - **Bandwidth**: ~100 bytes per text log, ~150 bytes per rich telemetry
 - **Latency**: <10ms from log call to network transmission
+- **Rate limiting**: Protects against accidental log flooding that could exhaust heap
 
 ### Power Consumption
 - **Idle**: No additional current draw when listeners inactive
 - **Active**: ~5mA additional during network transmission
 - **Sleep**: Compatible with deep sleep modes
+- **Power callbacks**: Optional onBeforeSleep/onAfterWake hooks for battery optimization
 
 ## ESP32 vs ESP8266 Differences
 
