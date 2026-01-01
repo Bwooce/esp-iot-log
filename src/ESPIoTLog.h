@@ -142,9 +142,9 @@ struct __attribute__((packed)) LogHeader {
     uint16_t length;        // Payload length
 };
 
-// System telemetry data
-struct SystemTelemetry {
-    // Basic telemetry
+// System telemetry data (packed for network transmission)
+struct __attribute__((packed)) SystemTelemetry {
+    // Basic telemetry (22 bytes)
     uint32_t heap_free;
     uint32_t heap_largest_block;
     uint8_t heap_fragmentation;
@@ -157,7 +157,7 @@ struct SystemTelemetry {
     uint16_t free_stack;
 
     // ESP-IDF Advanced telemetry (optional)
-    struct {
+    struct __attribute__((packed)) {
         uint32_t internal_free;
         uint32_t internal_largest;
         uint32_t external_free;     // PSRAM
@@ -168,7 +168,7 @@ struct SystemTelemetry {
         char critical_task[16];     // Task with lowest stack
     } advanced;
 
-    struct {
+    struct __attribute__((packed)) {
         uint8_t channel;
         int8_t tx_power;
         uint8_t bandwidth;          // 20/40MHz
@@ -177,7 +177,7 @@ struct SystemTelemetry {
         char country_code[4];
     } wifi_advanced;
 
-    struct {
+    struct __attribute__((packed)) {
         uint8_t chip_model;
         uint8_t chip_cores;
         uint8_t chip_revision;
