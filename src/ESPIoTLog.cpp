@@ -211,6 +211,82 @@ void ESPIoTLog::verbose(const char* format, ...) {
     }
 }
 
+// F() macro variants - copy flash string to RAM then log
+// Uses small stack buffer to minimize heap usage
+#define FLASH_FORMAT_BUF_SIZE 80
+
+void ESPIoTLog::error(const __FlashStringHelper* format, ...) {
+    if (_log_level >= LOG_LEVEL_ERROR) {
+        char buf[FLASH_FORMAT_BUF_SIZE];
+        strncpy_P(buf, (PGM_P)format, sizeof(buf) - 1);
+        buf[sizeof(buf) - 1] = '\0';
+        va_list args;
+        va_start(args, format);
+        logf(LOG_LEVEL_ERROR, buf, args);
+        va_end(args);
+    }
+}
+
+void ESPIoTLog::warn(const __FlashStringHelper* format, ...) {
+    if (_log_level >= LOG_LEVEL_WARN) {
+        char buf[FLASH_FORMAT_BUF_SIZE];
+        strncpy_P(buf, (PGM_P)format, sizeof(buf) - 1);
+        buf[sizeof(buf) - 1] = '\0';
+        va_list args;
+        va_start(args, format);
+        logf(LOG_LEVEL_WARN, buf, args);
+        va_end(args);
+    }
+}
+
+void ESPIoTLog::info(const __FlashStringHelper* format, ...) {
+    if (_log_level >= LOG_LEVEL_INFO) {
+        char buf[FLASH_FORMAT_BUF_SIZE];
+        strncpy_P(buf, (PGM_P)format, sizeof(buf) - 1);
+        buf[sizeof(buf) - 1] = '\0';
+        va_list args;
+        va_start(args, format);
+        logf(LOG_LEVEL_INFO, buf, args);
+        va_end(args);
+    }
+}
+
+void ESPIoTLog::debug(const __FlashStringHelper* format, ...) {
+    if (_log_level >= LOG_LEVEL_DEBUG) {
+        char buf[FLASH_FORMAT_BUF_SIZE];
+        strncpy_P(buf, (PGM_P)format, sizeof(buf) - 1);
+        buf[sizeof(buf) - 1] = '\0';
+        va_list args;
+        va_start(args, format);
+        logf(LOG_LEVEL_DEBUG, buf, args);
+        va_end(args);
+    }
+}
+
+void ESPIoTLog::verbose(const __FlashStringHelper* format, ...) {
+    if (_log_level >= LOG_LEVEL_VERBOSE) {
+        char buf[FLASH_FORMAT_BUF_SIZE];
+        strncpy_P(buf, (PGM_P)format, sizeof(buf) - 1);
+        buf[sizeof(buf) - 1] = '\0';
+        va_list args;
+        va_start(args, format);
+        logf(LOG_LEVEL_VERBOSE, buf, args);
+        va_end(args);
+    }
+}
+
+void ESPIoTLog::log(log_level_t level, const __FlashStringHelper* format, ...) {
+    if (_log_level >= level) {
+        char buf[FLASH_FORMAT_BUF_SIZE];
+        strncpy_P(buf, (PGM_P)format, sizeof(buf) - 1);
+        buf[sizeof(buf) - 1] = '\0';
+        va_list args;
+        va_start(args, format);
+        logf(level, buf, args);
+        va_end(args);
+    }
+}
+
 void ESPIoTLog::log(log_level_t level, const char* format, ...) {
     if (_log_level >= level) {
         va_list args;
@@ -388,10 +464,11 @@ bool ESPIoTLog::discoverListener() {
 
     if (found != _listener_active) {
         _listener_active = found;
+        // State change logged at DEBUG level to avoid spam
         if (found) {
-            info("Log listener discovered - logging enabled");
+            debug("Log listener active");
         } else {
-            info("No log listeners found - network logging disabled");
+            debug("Log listener inactive");
         }
     }
 

@@ -214,8 +214,16 @@ public:
     void debug(const char* format, ...);
     void verbose(const char* format, ...);
 
+    // F() macro variants - format strings in flash (saves RAM)
+    void error(const __FlashStringHelper* format, ...);
+    void warn(const __FlashStringHelper* format, ...);
+    void info(const __FlashStringHelper* format, ...);
+    void debug(const __FlashStringHelper* format, ...);
+    void verbose(const __FlashStringHelper* format, ...);
+
     // Direct logging with level
     void log(log_level_t level, const char* format, ...);
+    void log(log_level_t level, const __FlashStringHelper* format, ...);
     void logf(log_level_t level, const char* format, va_list args);
 
     // Custom metrics
