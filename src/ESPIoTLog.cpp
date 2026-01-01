@@ -32,10 +32,20 @@ ESPIoTLog::ESPIoTLog() :
     _dropped_count(0),
     _device_id(0),
     _buffer_size(DEFAULT_LOG_BUFFER_SIZE)
+#if IOTLOG_RATE_LIMIT_ENABLED
+    ,_rate_limit_window_start(0),
+    _rate_limit_count(0),
+    _rate_limit_dropped(0)
+#endif
 {
     strncpy(_multicast_ip, DEFAULT_MULTICAST_IP, sizeof(_multicast_ip));
     strncpy(_service_name, DEFAULT_SERVICE_NAME, sizeof(_service_name));
     _device_name[0] = '\0';
+
+#if IOTLOG_THREAD_SAFE && defined(ESP32)
+    // Initialize mutex for thread safety
+    _mutex = portMUX_INITIALIZER_UNLOCKED;
+#endif
 }
 
 ESPIoTLog::~ESPIoTLog() {
@@ -221,6 +231,11 @@ void ESPIoTLog::logf(log_level_t level, const char* format, va_list args) {
         return;
     }
 
+#if IOTLOG_THREAD_SAFE && defined(ESP32)
+    // Enter critical section for thread safety
+    portENTER_CRITICAL(&_mutex);
+#endif
+
     // Output to Serial if enabled
     if (_serial_enabled) {
         char timestamp[16];
@@ -240,12 +255,41 @@ void ESPIoTLog::logf(log_level_t level, const char* format, va_list args) {
 
     // Only send via network if listener is active
     if (!_listener_active) {
+#if IOTLOG_THREAD_SAFE && defined(ESP32)
+        portEXIT_CRITICAL(&_mutex);
+#endif
         return;
     }
+
+#if IOTLOG_RATE_LIMIT_ENABLED
+    // Check rate limiting (per-second window)
+    uint32_t now = millis();
+    uint32_t window = now / 1000;  // Current second
+    if (window != _rate_limit_window_start / 1000) {
+        // New window - reset counter
+        _rate_limit_window_start = now;
+        _rate_limit_count = 0;
+    }
+
+    if (_rate_limit_count >= IOTLOG_MAX_LOGS_PER_SECOND) {
+        // Rate limit exceeded - drop this log
+        _rate_limit_dropped++;
+        _dropped_count++;
+#if IOTLOG_THREAD_SAFE && defined(ESP32)
+        portEXIT_CRITICAL(&_mutex);
+#endif
+        return;
+    }
+    _rate_limit_count++;
+#endif
 
     // Format message for network transmission
     vsnprintf(_log_buffer, _buffer_size - 1, format, args);
     _log_buffer[_buffer_size - 1] = '\0';
+
+#if IOTLOG_THREAD_SAFE && defined(ESP32)
+    portEXIT_CRITICAL(&_mutex);
+#endif
 
     formatLogMessage(level, _log_buffer);
 }
@@ -638,6 +682,14 @@ void ESPIoTLog::logStartupInfo() {
 
         info("==================================");
     }
+#endif
+}
+
+void ESPIoTLog::resetRateLimit() {
+#if IOTLOG_RATE_LIMIT_ENABLED
+    _rate_limit_window_start = 0;
+    _rate_limit_count = 0;
+    _rate_limit_dropped = 0;
 #endif
 }
 

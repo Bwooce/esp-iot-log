@@ -62,14 +62,30 @@
 #define DEFAULT_DISCOVERY_INTERVAL DISCOVERY_MIN_INTERVAL
 
 // Platform-specific buffer sizes
+// Rationale: ESP8266 has ~50KB usable RAM vs ESP32's ~300KB
+// Buffer sizes are optimized to balance functionality with memory constraints
 #ifdef ESP8266
-  #define DEFAULT_LOG_BUFFER_SIZE 256      // Smaller for ESP8266
-  #define DEFAULT_MAX_MESSAGE_SIZE 128     // Smaller for ESP8266
-  #define SERIAL_FORMAT_BUFFER_SIZE 128    // Smaller serial buffer
+  #define DEFAULT_LOG_BUFFER_SIZE 256      // Message formatting buffer (halved for ESP8266)
+  #define DEFAULT_MAX_MESSAGE_SIZE 128     // Max network message payload (halved for ESP8266)
+  #define SERIAL_FORMAT_BUFFER_SIZE 128    // Serial output buffer (halved for ESP8266)
 #else
-  #define DEFAULT_LOG_BUFFER_SIZE 512      // Full size for ESP32
-  #define DEFAULT_MAX_MESSAGE_SIZE 256     // Full size for ESP32
-  #define SERIAL_FORMAT_BUFFER_SIZE 256    // Full serial buffer
+  #define DEFAULT_LOG_BUFFER_SIZE 512      // Message formatting buffer (ESP32 full size)
+  #define DEFAULT_MAX_MESSAGE_SIZE 256     // Max network message payload (ESP32 full size)
+  #define SERIAL_FORMAT_BUFFER_SIZE 256    // Serial output buffer (ESP32 full size)
+#endif
+
+// Rate limiting configuration (optional - prevents log flooding)
+#ifndef IOTLOG_RATE_LIMIT_ENABLED
+  #define IOTLOG_RATE_LIMIT_ENABLED 1      // Enabled by default for safety
+#endif
+#ifndef IOTLOG_MAX_LOGS_PER_SECOND
+  #define IOTLOG_MAX_LOGS_PER_SECOND 100   // Reasonable limit to prevent heap exhaustion
+#endif
+
+// Thread safety (opt-in for FreeRTOS multi-task scenarios)
+// Note: Adds ~200-500 bytes RAM overhead per mutex + CPU cycles
+#ifndef IOTLOG_THREAD_SAFE
+  #define IOTLOG_THREAD_SAFE 0             // Disabled by default (most Arduino sketches are single-threaded)
 #endif
 
 // Log level masks for selective filtering
@@ -223,6 +239,14 @@ public:
     // ESP-IDF Rich debugging (one-time startup logging)
     void logStartupInfo();
 
+    // Power management callbacks (optional - for battery-powered devices)
+    // Set these callbacks to suspend/resume logging around sleep operations
+    void (*onBeforeSleep)() = nullptr;
+    void (*onAfterWake)() = nullptr;
+
+    // Rate limiting control
+    void resetRateLimit();  // Reset rate limiter counters
+
     // Task loop (call from main loop)
     void loop();
 
@@ -276,6 +300,20 @@ private:
     // Buffer management
     char _log_buffer[DEFAULT_LOG_BUFFER_SIZE];
     size_t _buffer_size;
+
+    // Rate limiting state (if enabled)
+#if IOTLOG_RATE_LIMIT_ENABLED
+    uint32_t _rate_limit_window_start;  // Start of current 1-second window
+    uint16_t _rate_limit_count;         // Logs sent in current window
+    uint32_t _rate_limit_dropped;       // Total logs dropped due to rate limit
+#endif
+
+    // Thread safety (if enabled)
+#if IOTLOG_THREAD_SAFE
+#ifdef ESP32
+    portMUX_TYPE _mutex;                // ESP32 spinlock for critical sections
+#endif
+#endif
 
     // Constants
     static const uint16_t LOG_MAGIC = 0xE510;
