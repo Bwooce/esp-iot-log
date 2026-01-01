@@ -86,6 +86,12 @@ bool ESPIoTLog::begin(const char* device_name, log_level_t level) {
         }
     }
 
+    // Initialize UDP socket for sending multicast packets
+    if (!_udp.begin(0)) {  // Use any available port for sending
+        Serial.println("ESPIoTLog: Failed to initialize UDP");
+        return false;
+    }
+
     _initialized = true;
 
     info("ESPIoTLog initialized: %s", _device_name);
@@ -117,10 +123,20 @@ void ESPIoTLog::setSerialEnabled(bool enable) {
 }
 
 void ESPIoTLog::setMulticastAddress(const char* ip, uint16_t port) {
+    if (!ip || strlen(ip) == 0) {
+        return;  // Invalid IP, ignore
+    }
+
     strncpy(_multicast_ip, ip, sizeof(_multicast_ip) - 1);
     _multicast_ip[sizeof(_multicast_ip) - 1] = '\0';
     _multicast_port = port;
-    _multicast_addr.fromString(_multicast_ip);
+
+    // Validate IP format
+    if (!_multicast_addr.fromString(_multicast_ip)) {
+        // Failed to parse, revert to default
+        strncpy(_multicast_ip, DEFAULT_MULTICAST_IP, sizeof(_multicast_ip) - 1);
+        _multicast_addr.fromString(_multicast_ip);
+    }
 }
 
 void ESPIoTLog::setDiscoveryInterval(uint32_t interval_ms) {
@@ -128,6 +144,10 @@ void ESPIoTLog::setDiscoveryInterval(uint32_t interval_ms) {
 }
 
 void ESPIoTLog::setServiceName(const char* service) {
+    if (!service || strlen(service) == 0) {
+        return;  // Invalid service name, ignore
+    }
+
     strncpy(_service_name, service, sizeof(_service_name) - 1);
     _service_name[sizeof(_service_name) - 1] = '\0';
 }
@@ -232,6 +252,7 @@ void ESPIoTLog::logf(log_level_t level, const char* format, va_list args) {
 
 void ESPIoTLog::logMetric(const char* name, int32_t value) {
     if (!_initialized || !_listener_active) return;
+    if (!name || strlen(name) == 0) return;  // Invalid name
 
     // Create metric payload: name_length(1) + name + value(4)
     size_t name_len = strlen(name);
@@ -247,6 +268,8 @@ void ESPIoTLog::logMetric(const char* name, int32_t value) {
 
 void ESPIoTLog::logMetric(const char* name, const char* value) {
     if (!_initialized || !_listener_active) return;
+    if (!name || strlen(name) == 0) return;  // Invalid name
+    if (!value) value = "";  // Allow empty value, but not NULL
 
     // Create string metric payload: name_length(1) + name + value_length(1) + value
     size_t name_len = strlen(name);
@@ -401,10 +424,18 @@ void ESPIoTLog::collectTelemetry(SystemTelemetry& tel) {
         tel.heap_free = ESP.getFreeHeap();
 #ifdef ESP32
         tel.heap_largest_block = ESP.getMaxAllocHeap();
-        tel.heap_fragmentation = 100 - (tel.heap_largest_block * 100 / tel.heap_free);
+        if (tel.heap_free > 0) {
+            tel.heap_fragmentation = 100 - (tel.heap_largest_block * 100 / tel.heap_free);
+        } else {
+            tel.heap_fragmentation = 100;  // 100% fragmented if no free heap
+        }
 #elif defined(ESP8266)
         tel.heap_largest_block = ESP.getMaxFreeBlockSize();
-        tel.heap_fragmentation = 100 - (tel.heap_largest_block * 100 / tel.heap_free);
+        if (tel.heap_free > 0) {
+            tel.heap_fragmentation = 100 - (tel.heap_largest_block * 100 / tel.heap_free);
+        } else {
+            tel.heap_fragmentation = 100;  // 100% fragmented if no free heap
+        }
 #endif
     }
 
@@ -499,6 +530,11 @@ void ESPIoTLog::collectTaskInfo(SystemTelemetry& tel) {
         tel.advanced.critical_task[sizeof(tel.advanced.critical_task) - 1] = '\0';
 
         free(task_array);
+    } else {
+        // malloc failed - set safe defaults
+        tel.advanced.min_stack_remaining = 0;
+        strncpy(tel.advanced.critical_task, "malloc_fail", sizeof(tel.advanced.critical_task) - 1);
+        tel.advanced.critical_task[sizeof(tel.advanced.critical_task) - 1] = '\0';
     }
 }
 

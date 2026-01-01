@@ -30,18 +30,29 @@ void ESPCrashHandler::install() {
     if (_installed) return;
 
 #ifdef ESP32
-    // Register panic hook
-    esp_register_shutdown_handler(&panicHandler);
+    // Note: In Arduino framework, true crash handlers are not easily accessible
+    // Instead, we rely on reset reason detection on next boot in checkAndLogCrashes()
+    // esp_register_shutdown_handler only captures graceful shutdowns, not panics
 
-    // Install exception handlers if available
-    // Note: More advanced exception handling requires ESP-IDF level access
+    // Check if we had a previous crash/reset
+    esp_reset_reason_t reason = esp_reset_reason();
+    if (reason == ESP_RST_PANIC || reason == ESP_RST_INT_WDT ||
+        reason == ESP_RST_TASK_WDT || reason == ESP_RST_WDT) {
+        // Record the crash for next checkAndLogCrashes() call
+        recordCrash(CRASH_TYPE_PANIC, "reset_detected");
+    }
 
 #elif defined(ESP8266)
-    // Set custom crash callback
-    system_set_os_print(0); // Disable default crash output
-
-    // The custom_crash_callback is called from C, so we use a wrapper
-    // This is set up in the extern "C" function at bottom of file
+    // ESP8266: Check reset info on install
+    rst_info* resetInfo = ESP.getResetInfoPtr();
+    if (resetInfo && (resetInfo->reason == REASON_WDT_RST ||
+                      resetInfo->reason == REASON_EXCEPTION_RST ||
+                      resetInfo->reason == REASON_SOFT_WDT_RST)) {
+        // Record the crash for next checkAndLogCrashes() call
+        crash_type_t type = (resetInfo->reason == REASON_WDT_RST) ?
+                           CRASH_TYPE_WATCHDOG : CRASH_TYPE_EXCEPTION;
+        recordCrash(type, "reset_detected");
+    }
 #endif
 
     _installed = true;
@@ -197,16 +208,7 @@ bool ESPCrashHandler::validateCrashData(const CrashData& data) {
     return temp.checksum == data.checksum;
 }
 
-#ifdef ESP32
-void ESPCrashHandler::panicHandler() {
-    recordCrash(CRASH_TYPE_PANIC, "panic_handler");
-}
-
-void ESPCrashHandler::exceptionHandler() {
-    recordCrash(CRASH_TYPE_EXCEPTION, "exception_handler");
-}
-
-#elif defined(ESP8266)
+#ifdef ESP8266
 void ESPCrashHandler::crashCallback(struct rst_info* rst_info, uint32_t stack, uint32_t stack_end) {
     crash_type_t type = CRASH_TYPE_UNKNOWN;
 

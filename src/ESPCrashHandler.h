@@ -72,11 +72,6 @@ private:
     static uint8_t calculateChecksum(const CrashData& data);
     static bool validateCrashData(const CrashData& data);
 
-#ifdef ESP32
-    static void panicHandler();
-    static void exceptionHandler();
-#endif
-
     static bool _installed;
     static const uint32_t CRASH_MAGIC = 0xDEADBEEF;
 };
