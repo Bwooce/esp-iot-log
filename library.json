@@ -29,10 +29,7 @@
   ],
   "license": "MIT",
   "homepage": "https://github.com/Bwooce/esp-iot-log",
-  "dependencies": {
-    "ESPmDNS": "^2.0.0",
-    "WiFi": "*"
-  },
+  "dependencies": {},
   "frameworks": [
     "arduino",
     "espidf"
