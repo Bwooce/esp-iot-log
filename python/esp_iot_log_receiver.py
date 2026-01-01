@@ -421,12 +421,12 @@ class ESPIoTLogReceiver:
     def _handle_message(self, data: bytes, addr):
         """Parse and display received log message."""
         try:
-            # Parse header
-            if len(data) < 19:  # Minimum header size
+            # Parse header (18 bytes: magic(2) + version(1) + device_id(8) + timestamp(4) + log_type(1) + length(2))
+            if len(data) < 18:  # Minimum header size
                 return
 
-            header_data = data[:19]
-            magic, version, device_id, timestamp, log_type, length = struct.unpack('<HBQ I B H', header_data)
+            header_data = data[:18]
+            magic, version, device_id, timestamp, log_type, length = struct.unpack('<HBQIBH', header_data)
 
             if magic != LOG_MAGIC:
                 return  # Not our protocol
@@ -441,11 +441,11 @@ class ESPIoTLogReceiver:
             }
 
             # Extract payload and verify checksum
-            payload_end = 19 + length
+            payload_end = 18 + length
             if len(data) < payload_end + 2:  # +2 for checksum
                 return
 
-            payload = data[19:payload_end]
+            payload = data[18:payload_end]
             checksum = struct.unpack('<H', data[payload_end:payload_end+2])[0]
 
             # TODO: Verify checksum if needed
