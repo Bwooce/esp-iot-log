@@ -19,6 +19,17 @@
 
 **Fix:** Removed external dependencies since ESP8266/ESP32 frameworks provide WiFi and mDNS natively.
 
+### 3. Telemetry Struct Size Mismatch (FIXED)
+**File:** `python/esp_iot_log_receiver.py`
+
+**Problem:** Receiver expected 24-byte telemetry struct but C struct is 22 bytes:
+- Format was `<IIBBBHHBII H` (26 bytes with wrong types)
+- Should be `<IIBbBHhBIH` (22 bytes with correct signed types)
+
+**Symptoms:** `[TYPE_2] Unknown payload (100 bytes)` instead of parsed telemetry
+
+**Fix:** Updated struct format and all payload offsets (22, 65, 81 instead of 24, 67, 83).
+
 ---
 
 ## Suggestions for Improvement

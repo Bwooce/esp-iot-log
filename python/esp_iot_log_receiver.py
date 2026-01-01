@@ -81,9 +81,10 @@ class LogMessage:
                     self.parsed_payload = {'level': level, 'message': message}
 
             elif self.log_type == LOG_TYPE_TELEMETRY:
-                if len(self.payload) >= 24:  # Minimum size of SystemTelemetry struct
-                    # Basic telemetry (first 24 bytes)
-                    tel = struct.unpack('<IIBBBHHBII H', self.payload[:24])
+                if len(self.payload) >= 22:  # Size of SystemTelemetry struct (22 bytes)
+                    # Basic telemetry: heap_free(4) + heap_largest(4) + frag(1) + rssi(1) +
+                    # status(1) + reconnects(2) + temp(2) + reset(1) + uptime(4) + stack(2)
+                    tel = struct.unpack('<IIBbBHhBIH', self.payload[:22])
                     self.parsed_payload = {
                         'heap_free': tel[0],
                         'heap_largest_block': tel[1],
@@ -97,11 +98,11 @@ class LogMessage:
                         'free_stack': tel[9]
                     }
 
-                    # ESP-IDF Advanced telemetry (if present)
-                    if len(self.payload) >= 100:  # Extended telemetry size
+                    # ESP-IDF Advanced telemetry (if present, ESP32 only)
+                    if len(self.payload) >= 98:  # Extended telemetry size (22 + 76)
                         try:
-                            # Advanced heap (40 bytes)
-                            advanced = struct.unpack('<IIIIIIBH16s', self.payload[24:67])
+                            # Advanced heap info
+                            advanced = struct.unpack('<IIIIIIBH16s', self.payload[22:65])
                             self.parsed_payload['advanced'] = {
                                 'internal_free': advanced[0],
                                 'internal_largest': advanced[1],
@@ -114,7 +115,7 @@ class LogMessage:
                             }
 
                             # WiFi advanced (16 bytes)
-                            wifi_adv = struct.unpack('<BbBHB4s', self.payload[67:83])
+                            wifi_adv = struct.unpack('<BbBHB4s', self.payload[65:81])
                             self.parsed_payload['wifi_advanced'] = {
                                 'channel': wifi_adv[0],
                                 'tx_power': wifi_adv[1],
@@ -125,7 +126,7 @@ class LogMessage:
                             }
 
                             # Chip info (16 bytes)
-                            chip = struct.unpack('<BBBIBIBB', self.payload[83:99])
+                            chip = struct.unpack('<BBBIBIBB', self.payload[81:97])
                             self.parsed_payload['chip_info'] = {
                                 'model': chip[0],
                                 'cores': chip[1],
