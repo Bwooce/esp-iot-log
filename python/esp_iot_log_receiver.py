@@ -15,8 +15,10 @@ import threading
 import argparse
 import json
 import signal
+import subprocess
+import os
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 # Platform-specific mDNS imports
 try:
@@ -54,6 +56,71 @@ class Colors:
     VERBOSE = '\033[95m'  # Magenta
     TIMESTAMP = '\033[90m' # Gray
     DEVICE = '\033[96m'   # Cyan
+
+
+class BacktraceDecoder:
+    """Decodes ESP crash backtraces using addr2line."""
+
+    # Default paths for PlatformIO toolchains
+    DEFAULT_ADDR2LINE_PATHS = [
+        os.path.expanduser("~/.platformio/packages/toolchain-xtensa/bin/xtensa-lx106-elf-addr2line"),  # ESP8266
+        os.path.expanduser("~/.platformio/packages/toolchain-xtensa-esp32/bin/xtensa-esp32-elf-addr2line"),  # ESP32
+        os.path.expanduser("~/.platformio/packages/toolchain-xtensa-esp32s2/bin/xtensa-esp32s2-elf-addr2line"),  # ESP32-S2
+        os.path.expanduser("~/.platformio/packages/toolchain-xtensa-esp32s3/bin/xtensa-esp32s3-elf-addr2line"),  # ESP32-S3
+    ]
+
+    def __init__(self, elf_file: Optional[str] = None, addr2line_path: Optional[str] = None):
+        self.elf_file = elf_file
+        self.addr2line_path = addr2line_path or self._find_addr2line()
+        self._cache: Dict[int, str] = {}
+
+    def _find_addr2line(self) -> Optional[str]:
+        """Find addr2line in default locations."""
+        for path in self.DEFAULT_ADDR2LINE_PATHS:
+            if os.path.exists(path):
+                return path
+        return None
+
+    def decode_address(self, addr: int) -> str:
+        """Decode a single address to function:line."""
+        if not self.elf_file or not self.addr2line_path:
+            return f"0x{addr:08X}"
+
+        if addr in self._cache:
+            return self._cache[addr]
+
+        if addr == 0:
+            return "(null)"
+
+        try:
+            result = subprocess.run(
+                [self.addr2line_path, "-e", self.elf_file, "-f", "-C", f"0x{addr:08X}"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                lines = result.stdout.strip().split('\n')
+                if len(lines) >= 2:
+                    func = lines[0]
+                    loc = lines[1]
+                    # Shorten path if it's too long
+                    if '/' in loc:
+                        loc = loc.split('/')[-1]
+                    decoded = f"{func} at {loc}"
+                    self._cache[addr] = decoded
+                    return decoded
+        except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+            pass
+
+        return f"0x{addr:08X}"
+
+    def decode_backtrace(self, addresses: List[int]) -> List[str]:
+        """Decode a list of backtrace addresses."""
+        return [self.decode_address(addr) for addr in addresses if addr != 0]
+
+
+# Global backtrace decoder (set from main)
+_backtrace_decoder: Optional[BacktraceDecoder] = None
+
 
 class LogMessage:
     """Represents a parsed log message from ESP device."""
@@ -224,6 +291,18 @@ class LogMessage:
             temp_str = f"{tel['temperature']:.1f}°C" if tel['temperature'] is not None else "N/A"
             wifi_str = f"{tel['wifi_rssi']}dBm" if tel['wifi_rssi'] is not None else "N/A"
 
+            # Reset reason names for ESP8266
+            reset_reasons = {
+                0: "Normal",      # REASON_DEFAULT_RST
+                1: "WDT",         # REASON_WDT_RST
+                2: "Exception",   # REASON_EXCEPTION_RST
+                3: "SoftWDT",     # REASON_SOFT_WDT_RST
+                4: "SoftReset",   # REASON_SOFT_RESTART
+                5: "DeepSleep",   # REASON_DEEP_SLEEP_AWAKE
+                6: "ExtReset",    # REASON_EXT_SYS_RST
+            }
+            reset_str = reset_reasons.get(tel.get('reset_reason', 0), f"?{tel.get('reset_reason', 0)}")
+
             # Basic telemetry
             result = (f"{Colors.TIMESTAMP}{received}{Colors.RESET} "
                      f"{Colors.DEVICE}{device_short}{Colors.RESET} "
@@ -231,7 +310,8 @@ class LogMessage:
                      f"{Colors.INFO}[TELEMETRY]{Colors.RESET} "
                      f"Heap: {tel['heap_free']}B (frag: {tel['heap_fragmentation']}%), "
                      f"WiFi: {wifi_str}, Temp: {temp_str}, "
-                     f"Stack: {tel['free_stack']}B, Uptime: {tel['uptime']/1000:.1f}s")
+                     f"Stack: {tel['free_stack']}B, Uptime: {tel['uptime']/1000:.1f}s, "
+                     f"Reset: {reset_str}")
 
             # ESP-IDF Advanced telemetry (if present)
             if 'advanced' in tel:
@@ -259,13 +339,28 @@ class LogMessage:
 
         elif self.log_type == LOG_TYPE_EXCEPTION and self.parsed_payload:
             crash = self.parsed_payload
-            return (f"{Colors.TIMESTAMP}{received}{Colors.RESET} "
+
+            # Decode PC and backtrace if decoder is available
+            pc_str = f"0x{crash['pc']:08X}"
+            backtrace_str = ""
+            if _backtrace_decoder:
+                pc_str = _backtrace_decoder.decode_address(crash['pc'])
+                bt = crash.get('backtrace', [])
+                if bt and any(addr != 0 for addr in bt):
+                    decoded_bt = _backtrace_decoder.decode_backtrace(bt)
+                    if decoded_bt:
+                        backtrace_str = "\n                    Backtrace:\n"
+                        for i, frame in enumerate(decoded_bt):
+                            backtrace_str += f"                      #{i}: {frame}\n"
+
+            result = (f"{Colors.TIMESTAMP}{received}{Colors.RESET} "
                    f"{Colors.DEVICE}{device_short}{Colors.RESET} "
                    f"[{timestamp}] "
                    f"{Colors.ERROR}[CRASH]{Colors.RESET} "
                    f"Type: {crash['crash_type']}, Reason: {crash['reset_reason']}, "
-                   f"Heap: {crash['heap_free']}KB, PC: 0x{crash['pc']:08X}, "
+                   f"Heap: {crash['heap_free']}B, PC: {pc_str}, "
                    f"Func: {crash['last_function'] or 'unknown'}")
+            return result + backtrace_str.rstrip()
 
         elif self.log_type == LOG_TYPE_METRIC and self.parsed_payload:
             metric = self.parsed_payload
@@ -502,6 +597,8 @@ def main():
                        help='Output in JSON format')
     parser.add_argument('--no-color', action='store_true',
                        help='Disable colored output')
+    parser.add_argument('--elf', '-e', help='ELF file for backtrace decoding')
+    parser.add_argument('--addr2line', help='Path to addr2line tool (auto-detected if not specified)')
 
     args = parser.parse_args()
 
@@ -510,6 +607,15 @@ def main():
         for attr in dir(Colors):
             if not attr.startswith('_'):
                 setattr(Colors, attr, '')
+
+    # Set up backtrace decoder
+    global _backtrace_decoder
+    _backtrace_decoder = BacktraceDecoder(args.elf, args.addr2line)
+    if args.elf:
+        if _backtrace_decoder.addr2line_path:
+            print(f"Backtrace decoding enabled: {args.elf}")
+        else:
+            print("Warning: ELF file specified but addr2line not found")
 
     # Set up signal handler
     signal.signal(signal.SIGINT, signal_handler)
