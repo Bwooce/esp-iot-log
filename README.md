@@ -320,6 +320,22 @@ Checksum: CRC16-CCITT (2 bytes)
 - **Properties**: `multicast=239.255.1.100, version=1.0`
 - **Discovery**: ESP devices query for this service to detect listeners
 
+### Network Configuration
+
+**Multicast IP: 239.255.1.100**
+- Chosen from IANA Organization-Local Scope range (239.0.0.0-239.255.255.255)
+- Safe for private network use, no conflict with Internet multicast traffic
+- Similar to private IP addresses (192.168.x.x) - stays within your organization
+
+**Security Model:**
+- **No encryption**: Logs sent in plaintext over UDP multicast
+- **No authentication**: Any device on the network can receive logs
+- **Design philosophy**: Optimized for trusted networks (home/office WiFi)
+- **Firewall friendly**: Uses single multicast group, easy to allow/block
+- **Future**: TLS/encryption could be added as optional feature if needed
+
+**Note:** This library does not use SSL/TLS. SSL warnings during PlatformIO installation are from build tools, not the logging library itself.
+
 ## Troubleshooting
 
 ### Common Issues

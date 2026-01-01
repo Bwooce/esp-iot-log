@@ -318,14 +318,10 @@ void ESPIoTLog::logf(log_level_t level, const char* format, va_list args) {
         snprintf(timestamp, sizeof(timestamp), "[%010lu]", millis());
         Serial.printf("%s [%s] ", timestamp, LOG_LEVEL_NAMES[level]);
 
-#ifdef ESP32
-        Serial.vprintf(format, args);
-#elif defined(ESP8266)
-        // ESP8266 doesn't have vprintf, so format manually
+        // Format message manually for compatibility with older frameworks
         char message[SERIAL_FORMAT_BUFFER_SIZE];
         vsnprintf(message, sizeof(message), format, args);
         Serial.print(message);
-#endif
         Serial.println();
     }
 
@@ -628,6 +624,9 @@ void ESPIoTLog::collectAdvancedHeap(SystemTelemetry& tel) {
 }
 
 void ESPIoTLog::collectTaskInfo(SystemTelemetry& tel) {
+    // uxTaskGetSystemState requires configUSE_TRACE_FACILITY and is not available in older ESP-IDF
+    // Only compile this if we're on Arduino-ESP32 3.x+ or have the function available
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
     UBaseType_t task_count = uxTaskGetNumberOfTasks();
     tel.advanced.task_count = task_count < 255 ? (uint8_t)task_count : 255;
 
@@ -657,6 +656,13 @@ void ESPIoTLog::collectTaskInfo(SystemTelemetry& tel) {
         strncpy(tel.advanced.critical_task, "malloc_fail", sizeof(tel.advanced.critical_task) - 1);
         tel.advanced.critical_task[sizeof(tel.advanced.critical_task) - 1] = '\0';
     }
+#else
+    // Older ESP-IDF versions don't have uxTaskGetSystemState - set unavailable
+    tel.advanced.task_count = 0;
+    tel.advanced.min_stack_remaining = 0;
+    strncpy(tel.advanced.critical_task, "unavailable", sizeof(tel.advanced.critical_task) - 1);
+    tel.advanced.critical_task[sizeof(tel.advanced.critical_task) - 1] = '\0';
+#endif
 }
 
 void ESPIoTLog::collectAdvancedWiFi(SystemTelemetry& tel) {
@@ -732,9 +738,15 @@ void ESPIoTLog::logStartupInfo() {
             case CHIP_ESP32S2: chip_name = "ESP32-S2"; break;
             case CHIP_ESP32S3: chip_name = "ESP32-S3"; break;
             case CHIP_ESP32C3: chip_name = "ESP32-C3"; break;
+#ifdef CHIP_ESP32C2
             case CHIP_ESP32C2: chip_name = "ESP32-C2"; break;
+#endif
+#ifdef CHIP_ESP32C6
             case CHIP_ESP32C6: chip_name = "ESP32-C6"; break;
+#endif
+#ifdef CHIP_ESP32H2
             case CHIP_ESP32H2: chip_name = "ESP32-H2"; break;
+#endif
             default: chip_name = "Unknown ESP32"; break;
         }
 

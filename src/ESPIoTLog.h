@@ -37,7 +37,7 @@
 #include "ESPCrashHandler.h"
 
 // Library version
-#define ESP_IOT_LOG_VERSION "1.0.0"
+#define ESP_IOT_LOG_VERSION "1.1.0"
 
 // Default configuration
 #define DEFAULT_MULTICAST_IP "239.255.1.100"

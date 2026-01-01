@@ -1,6 +1,6 @@
 {
   "name": "ESP IoT Log",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Efficient multicast logging for ESP32/ESP8266 with mDNS discovery. Includes ESP-specific telemetry, system health monitoring, crash logging, and cross-platform log receiver. Zero overhead when no listeners are present.",
   "keywords": [
     "esp32",
