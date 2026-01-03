@@ -125,7 +125,7 @@ _backtrace_decoder: Optional[BacktraceDecoder] = None
 class LogMessage:
     """Represents a parsed log message from ESP device."""
 
-    def __init__(self, header: Dict, payload: bytes):
+    def __init__(self, header: Dict, payload: bytes, source_ip: str = None):
         self.magic = header['magic']
         self.version = header['version']
         self.device_id = header['device_id']
@@ -133,6 +133,7 @@ class LogMessage:
         self.log_type = header['log_type']
         self.length = header['length']
         self.payload = payload
+        self.source_ip = source_ip
         self.parsed_payload = None
         self.received_time = datetime.now(timezone.utc)
 
@@ -261,6 +262,7 @@ class LogMessage:
         device_short = self.format_device_id()[-8:]  # Last 4 bytes of MAC
         timestamp = self.format_timestamp()
         received = self.received_time.strftime("%H:%M:%S.%f")[:-3]
+        ip_str = f" ({self.source_ip})" if self.source_ip else ""
 
         if self.log_type == LOG_TYPE_TEXT and self.parsed_payload:
             level = self.parsed_payload['level']
@@ -281,7 +283,7 @@ class LogMessage:
                 color = Colors.VERBOSE
 
             return (f"{Colors.TIMESTAMP}{received}{Colors.RESET} "
-                   f"{Colors.DEVICE}{device_short}{Colors.RESET} "
+                   f"{Colors.DEVICE}{device_short}{ip_str}{Colors.RESET} "
                    f"[{timestamp}] "
                    f"{color}[{level_name:>7s}]{Colors.RESET} "
                    f"{message}")
@@ -305,7 +307,7 @@ class LogMessage:
 
             # Basic telemetry
             result = (f"{Colors.TIMESTAMP}{received}{Colors.RESET} "
-                     f"{Colors.DEVICE}{device_short}{Colors.RESET} "
+                     f"{Colors.DEVICE}{device_short}{ip_str}{Colors.RESET} "
                      f"[{timestamp}] "
                      f"{Colors.INFO}[TELEMETRY]{Colors.RESET} "
                      f"Heap: {tel['heap_free']}B (frag: {tel['heap_fragmentation']}%), "
@@ -354,7 +356,7 @@ class LogMessage:
                             backtrace_str += f"                      #{i}: {frame}\n"
 
             result = (f"{Colors.TIMESTAMP}{received}{Colors.RESET} "
-                   f"{Colors.DEVICE}{device_short}{Colors.RESET} "
+                   f"{Colors.DEVICE}{device_short}{ip_str}{Colors.RESET} "
                    f"[{timestamp}] "
                    f"{Colors.ERROR}[CRASH]{Colors.RESET} "
                    f"Type: {crash['crash_type']}, Reason: {crash['reset_reason']}, "
@@ -365,14 +367,14 @@ class LogMessage:
         elif self.log_type == LOG_TYPE_METRIC and self.parsed_payload:
             metric = self.parsed_payload
             return (f"{Colors.TIMESTAMP}{received}{Colors.RESET} "
-                   f"{Colors.DEVICE}{device_short}{Colors.RESET} "
+                   f"{Colors.DEVICE}{device_short}{ip_str}{Colors.RESET} "
                    f"[{timestamp}] "
                    f"{Colors.VERBOSE}[METRIC]{Colors.RESET} "
                    f"{metric['name']} = {metric['value']}")
 
         else:
             return (f"{Colors.TIMESTAMP}{received}{Colors.RESET} "
-                   f"{Colors.DEVICE}{device_short}{Colors.RESET} "
+                   f"{Colors.DEVICE}{device_short}{ip_str}{Colors.RESET} "
                    f"[{timestamp}] "
                    f"[TYPE_{self.log_type}] "
                    f"Unknown payload ({len(self.payload)} bytes)")
@@ -436,6 +438,12 @@ class ESPIoTLogReceiver:
             print(f"✗ UDP listener failed: {e}")
             self.stop()
             return False
+
+        # Log startup to output file
+        if self.file_handle:
+            timestamp = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3]
+            self.file_handle.write(f"\n{timestamp} === ESP IoT Log Receiver started ===\n")
+            self.file_handle.flush()
 
         print(f"\nListening for ESP IoT logs... (Press Ctrl+C to stop)\n")
         return True
@@ -546,8 +554,9 @@ class ESPIoTLogReceiver:
 
             # TODO: Verify checksum if needed
 
-            # Create log message and display
-            log_msg = LogMessage(header, payload)
+            # Create log message and display (extract IP from addr tuple)
+            source_ip = addr[0] if addr else None
+            log_msg = LogMessage(header, payload, source_ip)
 
             # Track statistics
             self.message_count += 1
@@ -572,6 +581,7 @@ class ESPIoTLogReceiver:
         json_data = {
             'timestamp': log_msg.received_time.isoformat(),
             'device_id': log_msg.format_device_id(),
+            'source_ip': log_msg.source_ip,
             'device_timestamp': log_msg.timestamp,
             'log_type': log_msg.log_type,
             'payload': log_msg.parsed_payload
