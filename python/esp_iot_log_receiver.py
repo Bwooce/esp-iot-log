@@ -212,8 +212,8 @@ class LogMessage:
                             pass
 
             elif self.log_type == LOG_TYPE_EXCEPTION:
-                if len(self.payload) >= 72:  # Size of CrashData struct
-                    crash = struct.unpack('<I I B B H I I 8I 32s B', self.payload[:72])
+                if len(self.payload) >= 85:  # Size of CrashData struct (packed)
+                    crash = struct.unpack('<I I B B H I I 8I 32s B', self.payload[:85])
                     self.parsed_payload = {
                         'magic': crash[0],
                         'timestamp': crash[1],
