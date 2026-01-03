@@ -277,10 +277,13 @@ class LogMessage:
                 addr_pattern = r'(epc[123]):0x([0-9a-fA-F]{8})'
                 def decode_addr(match):
                     label = match.group(1)
-                    addr = int(match.group(2), 16)
+                    addr_hex = match.group(2)
+                    addr = int(addr_hex, 16)
                     if addr != 0:
                         decoded = _backtrace_decoder.decode_address(addr)
-                        return f"{label}:{decoded}"
+                        # Keep original address and add decoded name in brackets
+                        if not decoded.startswith("0x"):  # Only add brackets if actually decoded
+                            return f"{label}:0x{addr_hex}[{decoded}]"
                     return match.group(0)
                 message = re.sub(addr_pattern, decode_addr, message)
 
