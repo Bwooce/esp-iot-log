@@ -416,6 +416,10 @@ class ESPIoTLogReceiver:
         self.start_time = time.time()
         self.devices_seen = set()
 
+        # mDNS re-registration tracking (every 60 seconds)
+        self._last_mdns_registration = 0
+        self._mdns_re_registration_interval = 60  # seconds
+
         # File output
         self.file_handle = None
         if output_file:
@@ -439,6 +443,7 @@ class ESPIoTLogReceiver:
         if HAS_ZEROCONF:
             try:
                 self._start_mdns_service()
+                self._last_mdns_registration = time.time()
                 print("✓ mDNS service advertised")
             except Exception as e:
                 print(f"⚠ mDNS service failed: {e}")
@@ -544,6 +549,15 @@ class ESPIoTLogReceiver:
                 data, addr = self.sock.recvfrom(1024)
                 self._handle_message(data, addr)
             except socket.timeout:
+                # Periodically re-register mDNS service to ensure availability
+                if time.time() - self._last_mdns_registration > self._mdns_re_registration_interval:
+                    if self.zeroconf and self.service_info:
+                        try:
+                            self.zeroconf.unregister_service(self.service_info)
+                            self.zeroconf.register_service(self.service_info)
+                            self._last_mdns_registration = time.time()
+                        except Exception as e:
+                            print(f"⚠ mDNS re-registration failed: {e}")
                 continue  # Check running flag
             except Exception as e:
                 if self.running:
