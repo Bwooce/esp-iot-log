@@ -18,6 +18,7 @@ import signal
 import subprocess
 import os
 import platform
+import re
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 
@@ -269,6 +270,19 @@ class LogMessage:
             level = self.parsed_payload['level']
             level_name = LOG_LEVELS[level] if level < len(LOG_LEVELS) else f"L{level}"
             message = self.parsed_payload['message']
+
+            # Decode addresses in crash messages if decoder is available
+            if _backtrace_decoder and ("epc1:" in message or "epc2:" in message or "epc3:" in message):
+                # Find all addresses like epc1:0x40258f13
+                addr_pattern = r'(epc[123]):0x([0-9a-fA-F]{8})'
+                def decode_addr(match):
+                    label = match.group(1)
+                    addr = int(match.group(2), 16)
+                    if addr != 0:
+                        decoded = _backtrace_decoder.decode_address(addr)
+                        return f"{label}:{decoded}"
+                    return match.group(0)
+                message = re.sub(addr_pattern, decode_addr, message)
 
             # Colorize based on log level
             color = Colors.RESET
