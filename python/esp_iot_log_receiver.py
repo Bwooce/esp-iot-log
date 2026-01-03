@@ -429,7 +429,12 @@ class ESPIoTLogReceiver:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.stop()
+        if exc_type is None:
+            self.stop("normal")
+        elif exc_type == KeyboardInterrupt:
+            self.stop("keyboard interrupt")
+        else:
+            self.stop(f"exception: {exc_type.__name__}")
 
     def start(self):
         """Start the receiver - advertise service and begin listening."""
@@ -480,9 +485,15 @@ class ESPIoTLogReceiver:
         print(f"\nListening for ESP IoT logs... (Press Ctrl+C to stop)\n")
         return True
 
-    def stop(self):
+    def stop(self, reason="normal"):
         """Stop the receiver and clean up resources."""
         self.running = False
+
+        # Log shutdown to output file
+        if self.file_handle and not self.file_handle.closed:
+            timestamp = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3]
+            self.file_handle.write(f"\n{timestamp} === ESP IoT Log Receiver stopped ({reason}) ===\n")
+            self.file_handle.flush()
 
         if self.sock:
             self.sock.close()
