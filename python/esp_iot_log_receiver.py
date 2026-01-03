@@ -17,6 +17,7 @@ import json
 import signal
 import subprocess
 import os
+import platform
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 
@@ -442,7 +443,19 @@ class ESPIoTLogReceiver:
         # Log startup to output file
         if self.file_handle:
             timestamp = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3]
-            self.file_handle.write(f"\n{timestamp} === ESP IoT Log Receiver started ===\n")
+            hostname = platform.node()
+
+            # Build parameter info
+            params = []
+            if _backtrace_decoder and _backtrace_decoder.elf_file:
+                params.append(f"ELF: {_backtrace_decoder.elf_file}")
+            if self.output_file:
+                params.append(f"Output: {self.output_file}")
+            if self.json_output:
+                params.append("Format: JSON")
+
+            param_str = f" ({', '.join(params)})" if params else ""
+            self.file_handle.write(f"\n{timestamp} === ESP IoT Log Receiver started on {hostname}{param_str} ===\n")
             self.file_handle.flush()
 
         print(f"\nListening for ESP IoT logs... (Press Ctrl+C to stop)\n")
