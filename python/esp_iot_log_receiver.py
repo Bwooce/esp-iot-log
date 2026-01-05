@@ -137,7 +137,7 @@ class LogMessage:
         self.payload = payload
         self.source_ip = source_ip
         self.parsed_payload = None
-        self.received_time = datetime.now(timezone.utc)
+        self.received_time = datetime.now()  # Local time for display
 
         self._parse_payload()
 
@@ -469,7 +469,7 @@ class ESPIoTLogReceiver:
 
         # Log startup to output file
         if self.file_handle:
-            timestamp = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3]
+            timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]  # Local time
             hostname = platform.node()
 
             # Build parameter info
@@ -494,7 +494,7 @@ class ESPIoTLogReceiver:
 
         # Log shutdown to output file
         if self.file_handle and not self.file_handle.closed:
-            timestamp = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3]
+            timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]  # Local time
             self.file_handle.write(f"\n{timestamp} === ESP IoT Log Receiver stopped ({reason}) ===\n")
             self.file_handle.flush()
 
