@@ -477,32 +477,57 @@ bool ESPIoTLog::sendLogMessage(log_type_t type, const uint8_t* data, size_t leng
         return false;
     }
 
-    // Prepare header
-    LogHeader header;
-    header.magic = LOG_MAGIC;
-    header.version = PROTOCOL_VERSION;
-    header.device_id = _device_id;
-    header.timestamp = millis();
-    header.log_type = type;
-    header.length = length;
+    // Header size: magic(2) + version(1) + device_id(8) + timestamp(4) + log_type(1) + length(2) = 18
+    const size_t HEADER_SIZE = 18;
 
     // Calculate total packet size
-    size_t total_size = sizeof(header) + length + 2; // +2 for CRC16
+    size_t total_size = HEADER_SIZE + length + 2; // +2 for CRC16
     if (total_size > 1024) { // Reasonable UDP limit
         _dropped_count++;
         return false;
     }
 
-    // Create packet
+    // Create packet with explicit byte-by-byte serialization
+    // (avoids ESP8266 packed struct issues with 64-bit at unaligned offset)
     uint8_t packet[1024];
-    memcpy(packet, &header, sizeof(header));
+    size_t pos = 0;
+
+    // magic (uint16_t, little-endian)
+    packet[pos++] = LOG_MAGIC & 0xFF;
+    packet[pos++] = (LOG_MAGIC >> 8) & 0xFF;
+
+    // version (uint8_t)
+    packet[pos++] = PROTOCOL_VERSION;
+
+    // device_id (uint64_t, little-endian)
+    uint64_t device_id = _device_id;
+    for (int i = 0; i < 8; i++) {
+        packet[pos++] = device_id & 0xFF;
+        device_id >>= 8;
+    }
+
+    // timestamp (uint32_t, little-endian)
+    uint32_t timestamp = millis();
+    packet[pos++] = timestamp & 0xFF;
+    packet[pos++] = (timestamp >> 8) & 0xFF;
+    packet[pos++] = (timestamp >> 16) & 0xFF;
+    packet[pos++] = (timestamp >> 24) & 0xFF;
+
+    // log_type (uint8_t)
+    packet[pos++] = type;
+
+    // length (uint16_t, little-endian)
+    packet[pos++] = length & 0xFF;
+    packet[pos++] = (length >> 8) & 0xFF;
+
+    // Payload
     if (length > 0) {
-        memcpy(packet + sizeof(header), data, length);
+        memcpy(packet + pos, data, length);
     }
 
     // Calculate and append checksum
-    uint16_t checksum = calculateChecksum(packet, sizeof(header) + length);
-    memcpy(packet + sizeof(header) + length, &checksum, sizeof(checksum));
+    uint16_t checksum = calculateChecksum(packet, HEADER_SIZE + length);
+    memcpy(packet + HEADER_SIZE + length, &checksum, sizeof(checksum));
 
     // Send UDP packet
     _udp.beginPacket(_multicast_addr, _multicast_port);
