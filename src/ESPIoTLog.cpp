@@ -72,6 +72,11 @@ bool ESPIoTLog::begin(const char* device_name, log_level_t level) {
     _log_level = level;
     _device_id = getDeviceId();
 
+    // Debug: Log device ID on Serial (can't use iotlog yet as we're not initialized)
+    Serial.printf("ESPIoTLog: device_id = 0x%08X%08X (ChipId=0x%08X)\n",
+                  (uint32_t)(_device_id >> 32), (uint32_t)_device_id,
+                  (uint32_t)ESP.getChipId());
+
     // Parse multicast IP
     if (!_multicast_addr.fromString(_multicast_ip)) {
         Serial.println("ESPIoTLog: Invalid multicast IP");
