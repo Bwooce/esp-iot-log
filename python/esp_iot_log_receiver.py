@@ -261,7 +261,7 @@ class LogMessage:
 
     def __str__(self) -> str:
         """Format log message for display."""
-        device_short = self.format_device_id()[-8:]  # Last 4 bytes of MAC
+        device_short = self.format_device_id()[:8]  # First 3 bytes (ESP8266 ChipId is 32-bit)
         timestamp = self.format_timestamp()
         received = self.received_time.strftime("%H:%M:%S.%f")[:-3]
         ip_str = f" ({self.source_ip})" if self.source_ip else ""
