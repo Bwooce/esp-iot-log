@@ -56,7 +56,8 @@ public:
     static void clearCrashData();
 
     // Manual crash recording (for custom error conditions)
-    static void recordCrash(crash_type_t type, const char* function = nullptr);
+    // reset_reason: pass -1 to read from ESP.getResetInfoPtr(), or explicit value from crash callback
+    static void recordCrash(crash_type_t type, const char* function = nullptr, int reset_reason = -1);
 
     // Crash statistics
     static uint32_t getCrashCount();

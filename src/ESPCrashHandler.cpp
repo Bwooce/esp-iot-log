@@ -49,9 +49,11 @@ void ESPCrashHandler::install() {
                       resetInfo->reason == REASON_EXCEPTION_RST ||
                       resetInfo->reason == REASON_SOFT_WDT_RST)) {
         // Record the crash for next checkAndLogCrashes() call
-        crash_type_t type = (resetInfo->reason == REASON_WDT_RST) ?
+        crash_type_t type = (resetInfo->reason == REASON_WDT_RST ||
+                            resetInfo->reason == REASON_SOFT_WDT_RST) ?
                            CRASH_TYPE_WATCHDOG : CRASH_TYPE_EXCEPTION;
-        recordCrash(type, "reset_detected");
+        // Pass the actual reset reason from resetInfo
+        recordCrash(type, "reset_detected", resetInfo->reason);
     }
 #endif
 
@@ -108,7 +110,7 @@ void ESPCrashHandler::clearCrashData() {
 #endif
 }
 
-void ESPCrashHandler::recordCrash(crash_type_t type, const char* function) {
+void ESPCrashHandler::recordCrash(crash_type_t type, const char* function, int reset_reason) {
     CrashData crash;
     memset(&crash, 0, sizeof(crash));
 
@@ -118,7 +120,8 @@ void ESPCrashHandler::recordCrash(crash_type_t type, const char* function) {
     crash.heap_free = ESP.getFreeHeap() / 1024; // Store as KB to fit in uint16_t
 
 #ifdef ESP32
-    crash.reset_reason = esp_reset_reason();
+    // Use provided reset_reason if valid, otherwise query system
+    crash.reset_reason = (reset_reason >= 0) ? (uint8_t)reset_reason : esp_reset_reason();
 
     // Get stack pointer (simplified)
     uint32_t* sp;
@@ -129,7 +132,9 @@ void ESPCrashHandler::recordCrash(crash_type_t type, const char* function) {
     crash.pc = (uint32_t)__builtin_return_address(0);
 
 #elif defined(ESP8266)
-    crash.reset_reason = ESP.getResetInfoPtr()->reason;
+    // Use provided reset_reason if valid, otherwise query system
+    // During crash callback, ESP.getResetInfoPtr() may have stale data from previous boot
+    crash.reset_reason = (reset_reason >= 0) ? (uint8_t)reset_reason : ESP.getResetInfoPtr()->reason;
 
     // ESP8266 stack info (limited)
     // Use stack pointer approximation since _estack isn't available
@@ -211,14 +216,19 @@ bool ESPCrashHandler::validateCrashData(const CrashData& data) {
 #ifdef ESP8266
 void ESPCrashHandler::crashCallback(struct rst_info* rst_info, uint32_t stack, uint32_t stack_end) {
     crash_type_t type = CRASH_TYPE_UNKNOWN;
+    int reason = -1;
 
     if (rst_info) {
+        reason = rst_info->reason;
         switch (rst_info->reason) {
             case REASON_WDT_RST:
                 type = CRASH_TYPE_WATCHDOG;
                 break;
             case REASON_EXCEPTION_RST:
                 type = CRASH_TYPE_EXCEPTION;
+                break;
+            case REASON_SOFT_WDT_RST:
+                type = CRASH_TYPE_WATCHDOG;
                 break;
             case REASON_EXT_SYS_RST:
                 type = CRASH_TYPE_BROWNOUT;
@@ -229,7 +239,8 @@ void ESPCrashHandler::crashCallback(struct rst_info* rst_info, uint32_t stack, u
         }
     }
 
-    recordCrash(type, "crash_callback");
+    // Pass the actual reset reason from rst_info, not stale ESP.getResetInfoPtr() data
+    recordCrash(type, "crash_callback", reason);
 }
 
 // C wrapper function for ESP8266 crash callback
