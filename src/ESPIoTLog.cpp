@@ -878,3 +878,57 @@ void ESPIoTLog::logCrash(const char* reason) {
         ESPCrashHandler::recordCrash(CRASH_TYPE_UNKNOWN, reason);
     }
 }
+
+// ESP8266 reset reason codes (from user_interface.h):
+//   0 = REASON_DEFAULT_RST      - Normal startup (power on)
+//   1 = REASON_WDT_RST          - Hardware watchdog reset
+//   2 = REASON_EXCEPTION_RST    - Exception reset
+//   3 = REASON_SOFT_WDT_RST     - Software watchdog reset
+//   4 = REASON_SOFT_RESTART     - Software restart (system_restart)
+//   5 = REASON_DEEP_SLEEP_AWAKE - Wake from deep sleep
+//   6 = REASON_EXT_SYS_RST      - External system reset
+//
+// ESP32 reset reason codes (from esp_system.h):
+//   1 = ESP_RST_POWERON         - Power on reset
+//   3 = ESP_RST_SW              - Software reset via esp_restart
+//   4 = ESP_RST_PANIC           - Software panic
+//   5 = ESP_RST_INT_WDT         - Interrupt watchdog
+//   6 = ESP_RST_TASK_WDT        - Task watchdog
+//   7 = ESP_RST_WDT             - Other watchdog
+//   8 = ESP_RST_DEEPSLEEP       - Deep sleep wake
+//   9 = ESP_RST_BROWNOUT        - Brownout reset
+//   10 = ESP_RST_SDIO           - SDIO reset
+
+const char* ESPIoTLog::getResetReasonName(uint8_t reason) {
+#ifdef ESP8266
+    switch (reason) {
+        case 0: return "Power on";
+        case 1: return "Hardware watchdog";
+        case 2: return "Exception";
+        case 3: return "Software watchdog";
+        case 4: return "Software restart";
+        case 5: return "Deep sleep wake";
+        case 6: return "External reset";
+        default: return "Unknown";
+    }
+#else // ESP32
+    switch (reason) {
+        case 1: return "Power on";
+        case 3: return "Software reset";
+        case 4: return "Panic";
+        case 5: return "Interrupt watchdog";
+        case 6: return "Task watchdog";
+        case 7: return "Watchdog";
+        case 8: return "Deep sleep wake";
+        case 9: return "Brownout";
+        case 10: return "SDIO reset";
+        default: return "Unknown";
+    }
+#endif
+}
+
+const char* ESPIoTLog::formatResetReason(uint8_t reason) {
+    static char buffer[32];
+    snprintf(buffer, sizeof(buffer), "%s [%d]", getResetReasonName(reason), reason);
+    return buffer;
+}

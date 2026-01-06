@@ -247,6 +247,12 @@ public:
     // ESP-IDF Rich debugging (one-time startup logging)
     void logStartupInfo();
 
+    // Reset reason utilities (static - can be called without instance)
+    // Returns human-readable name for ESP8266/ESP32 reset reason code
+    static const char* getResetReasonName(uint8_t reason);
+    // Returns formatted string like "Software restart [4]" (uses static buffer)
+    static const char* formatResetReason(uint8_t reason);
+
     // Power management callbacks (optional - for battery-powered devices)
     // Set these callbacks to suspend/resume logging around sleep operations
     void (*onBeforeSleep)() = nullptr;
