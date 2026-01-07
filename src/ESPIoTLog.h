@@ -238,6 +238,7 @@ public:
     // Manual operations
     void forceDiscovery();
     void sendTelemetry();
+    void flush();  // Ensure pending log messages are transmitted
 
     // Crash handling
     void enableCrashLogging(bool enable = true);

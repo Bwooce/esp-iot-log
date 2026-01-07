@@ -418,6 +418,15 @@ void ESPIoTLog::sendTelemetry() {
     sendLogMessage(LOG_TYPE_TELEMETRY, (uint8_t*)&tel, sizeof(tel));
 }
 
+void ESPIoTLog::flush() {
+    // Ensure any pending UDP packets are transmitted before continuing
+    // This is useful before operations that might crash, to ensure logs are sent
+    // On ESP8266, the WiFi stack needs yield() to actually transmit UDP packets
+    yield();
+    delay(5);  // Small delay to allow network transmission
+    yield();
+}
+
 void ESPIoTLog::loop() {
     if (!_initialized) return;
 
