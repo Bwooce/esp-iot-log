@@ -429,7 +429,14 @@ void ESPIoTLog::flush() {
 }
 
 void ESPIoTLog::loop() {
+    // Safety checks for calling from any task
     if (!_initialized) return;
+    if (WiFi.status() != WL_CONNECTED) return;  // mDNS requires WiFi
+
+    // Simple re-entrancy guard (not a full mutex - just prevents overlapping calls)
+    static volatile bool in_loop = false;
+    if (in_loop) return;
+    in_loop = true;
 
     uint32_t now = millis();
 
@@ -464,6 +471,8 @@ void ESPIoTLog::loop() {
         sendTelemetry();
         _last_telemetry = now;
     }
+
+    in_loop = false;
 }
 
 bool ESPIoTLog::discoverListener() {
