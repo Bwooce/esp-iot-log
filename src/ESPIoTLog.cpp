@@ -428,20 +428,8 @@ void ESPIoTLog::flush() {
     yield();
 }
 
-// Static flag for non-blocking try-lock (must be outside function for visibility)
-#if IOTLOG_THREAD_SAFE && defined(ESP32)
-static volatile bool _loop_in_progress = false;
-#endif
-
 void ESPIoTLog::loop() {
     if (!_initialized) return;
-
-#if IOTLOG_THREAD_SAFE && defined(ESP32)
-    // Non-blocking try-lock to prevent concurrent loop() calls
-    // If another task is in loop(), just exit - we'll try again later
-    if (_loop_in_progress) return;  // Another task is already running loop()
-    _loop_in_progress = true;
-#endif
 
     uint32_t now = millis();
 
@@ -476,10 +464,6 @@ void ESPIoTLog::loop() {
         sendTelemetry();
         _last_telemetry = now;
     }
-
-#if IOTLOG_THREAD_SAFE && defined(ESP32)
-    _loop_in_progress = false;
-#endif
 }
 
 bool ESPIoTLog::discoverListener() {
