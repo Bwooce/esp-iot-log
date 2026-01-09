@@ -49,7 +49,7 @@
 #define DISCOVERY_INITIAL_INTERVAL 0         // Start immediately on boot
 #endif
 #ifndef DISCOVERY_MIN_INTERVAL
-#define DISCOVERY_MIN_INTERVAL 10000         // 10 seconds minimum
+#define DISCOVERY_MIN_INTERVAL 60000         // 60 seconds minimum (mDNS query takes ~3s)
 #endif
 #ifndef DISCOVERY_MAX_INTERVAL
 #define DISCOVERY_MAX_INTERVAL 300000        // 300 seconds (5 min) maximum

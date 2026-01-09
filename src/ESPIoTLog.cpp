@@ -81,8 +81,8 @@ bool ESPIoTLog::begin(const char* device_name, log_level_t level) {
     // Initialize mDNS only if not already running
     bool mdns_started = false;
 #ifdef ESP32
-    // Try to query mDNS to see if it's already running
-    int test_result = MDNS.queryService("test", "tcp");
+    // Try to query mDNS to see if it's already running (100ms timeout - just a quick check)
+    int test_result = MDNS.queryService("test", "tcp", 100);
     mdns_started = (test_result >= 0); // -1 indicates mDNS not initialized
 #elif defined(ESP8266)
     // ESP8266: Check if mDNS is already running by checking instance
@@ -433,12 +433,16 @@ void ESPIoTLog::loop() {
     uint32_t now = millis();
 
     // Periodic discovery with exponential backoff
-    if (now - _last_discovery >= _current_discovery_interval) {
+    // When listener is active, use longer interval (5 min) to reduce blocking
+    uint32_t effective_interval = _listener_active ?
+        DISCOVERY_MAX_INTERVAL : _current_discovery_interval;
+
+    if (now - _last_discovery >= effective_interval) {
         bool found = discoverListener();
         _last_discovery = now;
 
         if (found) {
-            // Listener found - reset to minimum interval
+            // Listener found - use max interval (re-verify rarely)
             _current_discovery_interval = DISCOVERY_MIN_INTERVAL;
         } else {
             // No listener - exponential backoff up to max
@@ -463,7 +467,9 @@ void ESPIoTLog::loop() {
 
 bool ESPIoTLog::discoverListener() {
     // Query for the logging service
-    int n = MDNS.queryService("esp-iot-log", "udp");
+    // Use shorter timeout (500ms) - we only need to find ONE listener
+    // Default is 3000ms which blocks the main loop too long
+    int n = MDNS.queryService("esp-iot-log", "udp", 500);
 
     bool found = (n > 0);
 
