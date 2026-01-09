@@ -467,9 +467,14 @@ void ESPIoTLog::loop() {
 
 bool ESPIoTLog::discoverListener() {
     // Query for the logging service
+#ifdef ESP8266
     // Use shorter timeout (500ms) - we only need to find ONE listener
     // Default is 3000ms which blocks the main loop too long
     int n = MDNS.queryService("esp-iot-log", "udp", 500);
+#else
+    // ESP32 mDNS doesn't support timeout argument, uses default ~1s
+    int n = MDNS.queryService("esp-iot-log", "udp");
+#endif
 
     bool found = (n > 0);
 
