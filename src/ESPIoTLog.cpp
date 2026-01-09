@@ -81,8 +81,9 @@ bool ESPIoTLog::begin(const char* device_name, log_level_t level) {
     // Initialize mDNS only if not already running
     bool mdns_started = false;
 #ifdef ESP32
-    // Try to query mDNS to see if it's already running (100ms timeout - just a quick check)
-    int test_result = MDNS.queryService("test", "tcp", 100);
+    // Try to query mDNS to see if it's already running
+    // ESP32 mDNS doesn't support timeout argument
+    int test_result = MDNS.queryService("test", "tcp");
     mdns_started = (test_result >= 0); // -1 indicates mDNS not initialized
 #elif defined(ESP8266)
     // ESP8266: Check if mDNS is already running by checking instance
