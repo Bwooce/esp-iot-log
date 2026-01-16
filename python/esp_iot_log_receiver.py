@@ -69,6 +69,7 @@ class BacktraceDecoder:
         os.path.expanduser("~/.platformio/packages/toolchain-xtensa-esp32/bin/xtensa-esp32-elf-addr2line"),  # ESP32
         os.path.expanduser("~/.platformio/packages/toolchain-xtensa-esp32s2/bin/xtensa-esp32s2-elf-addr2line"),  # ESP32-S2
         os.path.expanduser("~/.platformio/packages/toolchain-xtensa-esp32s3/bin/xtensa-esp32s3-elf-addr2line"),  # ESP32-S3
+        os.path.expanduser("~/.platformio/packages/toolchain-riscv32-esp/bin/riscv32-esp-elf-addr2line"), # ESP32-C3
     ]
 
     def __init__(self, elf_file: Optional[str] = None, addr2line_path: Optional[str] = None):
