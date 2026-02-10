@@ -45,6 +45,7 @@
   "export": {
     "include": [
       "src/*",
+      "esp-idf/*",
       "examples/*",
       "python/*",
       "README.md",
