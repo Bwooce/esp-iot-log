@@ -20,6 +20,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/net/socket.h>
 #include <zephyr/net/net_if.h>
+#include <zephyr/net/net_ip.h>
 #include <zephyr/net/openthread.h>
 
 #include <openthread/thread.h>
@@ -279,43 +280,48 @@ int iot_log_init(const iot_log_config_t *config)
         return -1;
     }
 
-    /* Set multicast hop limit (8 — enough for mesh + border router) */
-    int hops = 8;
-    zsock_setsockopt(s_log.sock, IPPROTO_IPV6, IPV6_MULTICAST_HOPS,
-                     &hops, sizeof(hops));
-
     /* Set up multicast destination */
     memset(&s_log.mcast_addr, 0, sizeof(s_log.mcast_addr));
     s_log.mcast_addr.sin6_family = AF_INET6;
     s_log.mcast_addr.sin6_port = htons(mcast_port);
     zsock_inet_pton(AF_INET6, mcast_ip, &s_log.mcast_addr.sin6_addr);
 
+    /* Join the multicast group at the network interface level.
+     * Zephyr doesn't expose IPV6_ADD_MEMBERSHIP via setsockopt —
+     * use net_if_ipv6_maddr_add() instead. This registers the
+     * multicast address so the Thread stack knows to receive it. */
+    {
+        struct net_if *iface = net_if_get_default();
+        struct in6_addr mcast_in6;
+        zsock_inet_pton(AF_INET6, mcast_ip, &mcast_in6);
+        struct net_if_mcast_addr *maddr = net_if_ipv6_maddr_add(iface, &mcast_in6);
+        if (maddr) {
+            LOG_INF("Joined multicast group [%s]", mcast_ip);
+        } else {
+            LOG_WRN("Failed to join multicast group (may already be joined)");
+        }
+    }
+
     /* Create RX socket (for receiving beacons from Python receiver) */
     if (!s_log.always_on) {
         s_log.rx_sock = zsock_socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
         if (s_log.rx_sock < 0) {
             LOG_WRN("Failed to create RX UDP6 socket: %d (beacon discovery disabled)", errno);
-            /* Fall back to always-on if we can't listen for beacons */
             s_log.always_on = true;
         } else {
-            /* Bind to the multicast port */
-            struct sockaddr_in6 bind_addr = {
-                .sin6_family = AF_INET6,
-                .sin6_port = htons(mcast_port),
-                .sin6_addr = IN6ADDR_ANY_INIT,
-            };
+            struct sockaddr_in6 bind_addr;
+            memset(&bind_addr, 0, sizeof(bind_addr));
+            bind_addr.sin6_family = AF_INET6;
+            bind_addr.sin6_port = htons(mcast_port);
+            /* Bind to in6addr_any to receive multicast */
+            memset(&bind_addr.sin6_addr, 0, sizeof(bind_addr.sin6_addr));
+
             if (zsock_bind(s_log.rx_sock, (struct sockaddr *)&bind_addr,
                            sizeof(bind_addr)) < 0) {
                 LOG_WRN("Failed to bind RX socket: %d", errno);
                 zsock_close(s_log.rx_sock);
                 s_log.rx_sock = -1;
                 s_log.always_on = true;
-            } else {
-                /* Join the multicast group to receive beacons */
-                struct ipv6_mreq mreq = { .ipv6mr_ifindex = 0 };
-                zsock_inet_pton(AF_INET6, mcast_ip, &mreq.ipv6mr_multiaddr);
-                zsock_setsockopt(s_log.rx_sock, IPPROTO_IPV6, IPV6_ADD_MEMBERSHIP,
-                                 &mreq, sizeof(mreq));
             }
         }
     }

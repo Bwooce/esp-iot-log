@@ -755,9 +755,11 @@ def main():
     parser = argparse.ArgumentParser(description='ESP IoT Log Receiver')
     parser.add_argument('--ip', default=DEFAULT_MULTICAST_IP,
                        help=f'IPv4 multicast address (default: {DEFAULT_MULTICAST_IP})')
-    parser.add_argument('--ip6', nargs='?', const=DEFAULT_MULTICAST_IP6, default=None,
-                       help=f'Enable IPv6 multicast for Thread/OpenThread devices '
-                            f'(default: {DEFAULT_MULTICAST_IP6})')
+    parser.add_argument('--ip6', nargs='?', const=DEFAULT_MULTICAST_IP6, default=DEFAULT_MULTICAST_IP6,
+                       help=f'IPv6 multicast address for Thread/OpenThread devices '
+                            f'(default: {DEFAULT_MULTICAST_IP6}, use --no-ip6 to disable)')
+    parser.add_argument('--no-ip6', action='store_true',
+                       help='Disable IPv6 multicast listener')
     parser.add_argument('--port', type=int, default=DEFAULT_MULTICAST_PORT,
                        help=f'UDP port (default: {DEFAULT_MULTICAST_PORT})')
     parser.add_argument('--service', default=DEFAULT_SERVICE_NAME,
@@ -771,6 +773,14 @@ def main():
     parser.add_argument('--addr2line', help='Path to addr2line tool (auto-detected if not specified)')
 
     args = parser.parse_args()
+
+    # Handle --no-ip6 / IPv6 availability
+    ip6_addr = None
+    if not args.no_ip6 and args.ip6:
+        if socket.has_ipv6:
+            ip6_addr = args.ip6
+        else:
+            print("Warning: IPv6 not available on this system, disabling IPv6 listener")
 
     # Disable colors if requested or output is not a TTY
     if args.no_color or not sys.stdout.isatty():
@@ -792,7 +802,7 @@ def main():
 
     # Start receiver
     with ESPIoTLogReceiver(args.ip, args.port, args.service, args.output, args.json,
-                           multicast_ip6=args.ip6) as receiver:
+                           multicast_ip6=ip6_addr) as receiver:
         if receiver.start():
             try:
                 receiver.listen()
