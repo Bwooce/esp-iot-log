@@ -155,6 +155,7 @@ class BacktraceDecoder:
 
 # Global backtrace decoder (set from main)
 _backtrace_decoder: Optional[BacktraceDecoder] = None
+_show_ip: bool = False
 
 
 class LogMessage:
@@ -297,7 +298,7 @@ class LogMessage:
         device_short = self.format_device_id()[:8]  # First 3 bytes (ESP8266 ChipId is 32-bit)
         timestamp = self.format_timestamp()
         received = self.received_time.strftime("%H:%M:%S.%f")[:-3]
-        ip_str = f" ({self.source_ip})" if self.source_ip else ""
+        ip_str = f" ({self.source_ip})" if (_show_ip and self.source_ip) else ""
 
         if self.log_type == LOG_TYPE_TEXT and self.parsed_payload:
             level = self.parsed_payload['level']
@@ -772,10 +773,16 @@ def main():
                        help='Output in JSON format')
     parser.add_argument('--no-color', action='store_true',
                        help='Disable colored output')
+    parser.add_argument('--show-ip', action='store_true',
+                       help='Show source IP address for each message')
     parser.add_argument('--elf', '-e', help='ELF file for backtrace decoding')
     parser.add_argument('--addr2line', help='Path to addr2line tool (auto-detected if not specified)')
 
     args = parser.parse_args()
+
+    # Show IP flag
+    global _show_ip
+    _show_ip = args.show_ip
 
     # Handle --no-ip6 / IPv6 availability
     ip6_addr = None

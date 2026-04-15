@@ -59,9 +59,10 @@ static void process(const struct log_backend *const backend,
         return;
     }
 
-    /* Format the message */
+    /* Format the message — skip level and timestamp since the binary
+     * protocol header carries both. Keep module name for context. */
     msg_pos = 0;
-    uint32_t flags = LOG_OUTPUT_FLAG_LEVEL | LOG_OUTPUT_FLAG_TIMESTAMP;
+    uint32_t flags = 0;
     log_format_func_t log_output_func = log_format_func_t_get(LOG_OUTPUT_TEXT);
     log_output_func(&log_output_iot, &msg->log, flags);
 
