@@ -67,6 +67,7 @@ static struct {
 
     int64_t         last_beacon_ms; /* k_uptime when last beacon received */
     bool            mcast_joined;  /* True once OT multicast subscription done */
+    bool            beacon_confirmed; /* True after first real beacon received */
     char            mcast_ip[48];  /* Saved for deferred join */
 
     uint32_t        sent_count;
@@ -153,6 +154,7 @@ static void check_for_beacons(void)
             bool was_active = s_log.listener_active;
             s_log.last_beacon_ms = k_uptime_get();
             s_log.listener_active = true;
+            s_log.beacon_confirmed = true;
             if (!was_active) {
                 LOG_INF("Log listener discovered via beacon");
             }
@@ -350,6 +352,9 @@ void iot_log_deinit(void)
     s_log.listener_active = false;
 }
 
+/* Defined in log_backend_iot.c — drains the ring buffer from main thread */
+extern void iot_log_backend_drain(void);
+
 void iot_log_poll(void)
 {
     if (!s_log.initialised) {
@@ -371,6 +376,15 @@ void iot_log_poll(void)
             if (err == OT_ERROR_NONE || err == OT_ERROR_ALREADY) {
                 LOG_INF("Joined multicast group [%s]", s_log.mcast_ip);
                 s_log.mcast_joined = true;
+                /* Optimistically assume a listener exists so we capture
+                 * boot/connect logs. Will go silent after BEACON_GRACE_S
+                 * if no beacon arrives to confirm. */
+                if (!s_log.always_on && !s_log.listener_active) {
+                    s_log.listener_active = true;
+                    s_log.last_beacon_ms = k_uptime_get();
+                    LOG_INF("Optimistic send active (%ds grace)",
+                            IOT_LOG_BEACON_GRACE_S);
+                }
             } else {
                 LOG_WRN("Failed to join multicast group: %d", err);
             }
@@ -381,16 +395,27 @@ void iot_log_poll(void)
     if (!s_log.always_on) {
         check_for_beacons();
 
-        /* Expire listener if no beacon received within timeout */
+        /* Expire listener if no beacon received within timeout.
+         * Uses shorter grace period until first real beacon arrives,
+         * then the normal 3x-interval timeout after that. */
         if (s_log.listener_active && s_log.last_beacon_ms > 0) {
             int64_t elapsed = k_uptime_get() - s_log.last_beacon_ms;
-            if (elapsed > (int64_t)IOT_LOG_BEACON_TIMEOUT_S * 1000) {
+            int64_t timeout = s_log.beacon_confirmed ?
+                (int64_t)IOT_LOG_BEACON_TIMEOUT_S * 1000 :
+                (int64_t)IOT_LOG_BEACON_GRACE_S * 1000;
+            if (elapsed > timeout) {
                 s_log.listener_active = false;
-                LOG_INF("Log listener timed out (no beacon for %llds)",
+                LOG_INF("Log listener timed out (%s, %llds)",
+                        s_log.beacon_confirmed ? "no beacon" : "grace expired",
                         elapsed / 1000);
             }
         }
     }
+
+    /* Drain queued log messages from the Zephyr log backend.
+     * The backend queues to a ring buffer (logging thread has small stack),
+     * and we send from here in the main thread where stack is safe. */
+    iot_log_backend_drain();
 }
 
 bool iot_log_is_active(void)
@@ -440,6 +465,28 @@ void iot_log(iot_log_level_t level, const char *fmt, ...)
     send_message(IOT_LOG_TYPE_TEXT, payload, 1 + msg_len);
 
     k_mutex_unlock(&s_log_mutex);
+}
+
+bool iot_log_send_raw(iot_log_level_t level, const char *msg, size_t len)
+{
+    if (!s_log.initialised) {
+        return false;
+    }
+
+    k_mutex_lock(&s_log_mutex, K_FOREVER);
+
+    if (len > 500) {
+        len = 500;
+    }
+
+    uint8_t payload[502];
+    payload[0] = (uint8_t)level;
+    memcpy(payload + 1, msg, len);
+
+    bool ok = send_message(IOT_LOG_TYPE_TEXT, payload, 1 + len);
+
+    k_mutex_unlock(&s_log_mutex);
+    return ok;
 }
 
 void iot_log_metric(const char *name, int32_t value)

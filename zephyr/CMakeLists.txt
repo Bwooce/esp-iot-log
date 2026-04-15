@@ -10,5 +10,6 @@
 if(CONFIG_IOT_LOG)
   zephyr_library()
   zephyr_library_sources(iot_log_zephyr.c)
+  zephyr_library_sources(log_backend_iot.c)
   zephyr_include_directories(include)
 endif()

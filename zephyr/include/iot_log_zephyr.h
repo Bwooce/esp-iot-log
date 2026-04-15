@@ -14,6 +14,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdarg.h>
 
 #ifdef __cplusplus
@@ -30,9 +31,12 @@ extern "C" {
 #define IOT_LOG_DEFAULT_MCAST_PORT 4210
 
 /* Beacon discovery: Python receiver sends a beacon every 30s.
- * Device considers listener "active" if a beacon arrived within this window. */
+ * Device considers listener "active" if a beacon arrived within this window.
+ * On Thread attach, the device optimistically sends for BEACON_GRACE_S
+ * before the first beacon must arrive — captures boot/connect logs. */
 #define IOT_LOG_BEACON_TYPE        0xFF
 #define IOT_LOG_BEACON_TIMEOUT_S   90   /* 3x beacon interval */
+#define IOT_LOG_BEACON_GRACE_S     60   /* Send optimistically after attach */
 
 /* Log levels (match Arduino/ESP-IDF libraries) */
 typedef enum {
@@ -123,6 +127,12 @@ void iot_log_metric(const char *name, int32_t value);
  * Log a string metric.
  */
 void iot_log_metric_str(const char *name, const char *value);
+
+/**
+ * Send a pre-formatted log message (used by Zephyr log backend).
+ * Returns true if the message was sent successfully.
+ */
+bool iot_log_send_raw(iot_log_level_t level, const char *msg, size_t len);
 
 /**
  * Get log statistics.
