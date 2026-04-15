@@ -32,6 +32,7 @@ except ImportError:
 
 # Default configuration
 DEFAULT_MULTICAST_IP = "239.255.1.100"
+DEFAULT_MULTICAST_IP6 = "ff05::e510"
 DEFAULT_MULTICAST_PORT = 4210
 DEFAULT_SERVICE_NAME = "_esp-iot-log._udp.local."
 
@@ -58,6 +59,38 @@ class Colors:
     VERBOSE = '\033[95m'  # Magenta
     TIMESTAMP = '\033[90m' # Gray
     DEVICE = '\033[96m'   # Cyan
+
+
+# Beacon packet: sent by receiver to tell devices a listener is active.
+# Same magic, version=1, type=0xFF, length=0, no payload, CRC16.
+# Devices listen for this on the multicast group to decide whether to send.
+BEACON_TYPE = 0xFF
+BEACON_INTERVAL = 30  # seconds
+
+
+def build_beacon_packet() -> bytes:
+    """Build a minimal beacon packet using the log protocol format."""
+    # Header: magic(2) + version(1) + device_id(8) + timestamp(4) + type(1) + length(2) = 18
+    # Payload: 0 bytes
+    # CRC16: 2 bytes
+    header = struct.pack('<HBQIBH',
+                         LOG_MAGIC,
+                         PROTOCOL_VERSION,
+                         0,  # device_id = 0 (receiver, not a device)
+                         int(time.time()) & 0xFFFFFFFF,  # wall clock as timestamp
+                         BEACON_TYPE,
+                         0)  # length = 0
+    # CRC16-CCITT over header
+    crc = 0xFFFF
+    for b in header:
+        crc ^= b << 8
+        for _ in range(8):
+            if crc & 0x8000:
+                crc = (crc << 1) ^ 0x1021
+            else:
+                crc <<= 1
+            crc &= 0xFFFF
+    return header + struct.pack('<H', crc)
 
 
 class BacktraceDecoder:
@@ -401,8 +434,10 @@ class ESPIoTLogReceiver:
     """Main receiver class that handles mDNS advertising and UDP multicast listening."""
 
     def __init__(self, multicast_ip: str, port: int, service_name: str,
-                 output_file: Optional[str] = None, json_output: bool = False):
+                 output_file: Optional[str] = None, json_output: bool = False,
+                 multicast_ip6: Optional[str] = None):
         self.multicast_ip = multicast_ip
+        self.multicast_ip6 = multicast_ip6
         self.port = port
         self.service_name = service_name
         self.output_file = output_file
@@ -411,6 +446,7 @@ class ESPIoTLogReceiver:
 
         # Network objects
         self.sock = None
+        self.sock6 = None
         self.zeroconf = None
         self.service_info = None
 
@@ -442,7 +478,9 @@ class ESPIoTLogReceiver:
     def start(self):
         """Start the receiver - advertise service and begin listening."""
         print(f"Starting ESP IoT Log Receiver...")
-        print(f"Multicast: {self.multicast_ip}:{self.port}")
+        print(f"Multicast IPv4: {self.multicast_ip}:{self.port}")
+        if self.multicast_ip6:
+            print(f"Multicast IPv6: [{self.multicast_ip6}]:{self.port}")
         print(f"Service: {self.service_name}")
 
         self.running = True
@@ -452,20 +490,28 @@ class ESPIoTLogReceiver:
             try:
                 self._start_mdns_service()
                 self._last_mdns_registration = time.time()
-                print("✓ mDNS service advertised")
+                print("+ mDNS service advertised")
             except Exception as e:
-                print(f"⚠ mDNS service failed: {e}")
+                print(f"! mDNS service failed: {e}")
         else:
-            print("⚠ mDNS not available - devices won't auto-discover this listener")
+            print("! mDNS not available - ESP devices won't auto-discover this listener")
 
-        # Start UDP multicast listener
+        # Start UDP IPv4 multicast listener
         try:
             self._start_udp_listener()
-            print("✓ UDP multicast listener started")
+            print("+ UDP IPv4 multicast listener started")
         except Exception as e:
-            print(f"✗ UDP listener failed: {e}")
+            print(f"x UDP IPv4 listener failed: {e}")
             self.stop()
             return False
+
+        # Start UDP IPv6 multicast listener (optional)
+        if self.multicast_ip6:
+            try:
+                self._start_udp6_listener()
+                print("+ UDP IPv6 multicast listener started")
+            except Exception as e:
+                print(f"! UDP IPv6 listener failed: {e} (Thread devices won't be received)")
 
         # Log startup to output file
         if self.file_handle:
@@ -480,6 +526,8 @@ class ESPIoTLogReceiver:
                 params.append(f"Output: {self.output_file}")
             if self.json_output:
                 params.append("Format: JSON")
+            if self.multicast_ip6:
+                params.append(f"IPv6: {self.multicast_ip6}")
 
             param_str = f" ({', '.join(params)})" if params else ""
             self.file_handle.write(f"\n{timestamp} === ESP IoT Log Receiver started on {hostname}{param_str} ===\n")
@@ -500,6 +548,9 @@ class ESPIoTLogReceiver:
 
         if self.sock:
             self.sock.close()
+
+        if self.sock6:
+            self.sock6.close()
 
         if self.zeroconf:
             self.zeroconf.unregister_service(self.service_info)
@@ -541,29 +592,80 @@ class ESPIoTLogReceiver:
         self.zeroconf.register_service(self.service_info)
 
     def _start_udp_listener(self):
-        """Start UDP multicast socket listener."""
-        # Create UDP socket
+        """Start UDP IPv4 multicast socket listener."""
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-        # Bind to multicast address
-        self.sock.bind((self.multicast_ip, self.port))
+        # Bind to all interfaces on the port
+        self.sock.bind(('', self.port))
 
-        # Join multicast group
+        # Join IPv4 multicast group
         mreq = struct.pack("4s4s", socket.inet_aton(self.multicast_ip), socket.inet_aton("0.0.0.0"))
         self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
 
-        # Set timeout for graceful shutdown
-        self.sock.settimeout(1.0)
+        self.sock.setblocking(False)
+
+    def _start_udp6_listener(self):
+        """Start UDP IPv6 multicast socket listener for Thread/OpenThread devices."""
+        self.sock6 = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        self.sock6.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+        # Bind to all IPv6 interfaces on the port
+        self.sock6.bind(('::', self.port))
+
+        # Join IPv6 multicast group on all interfaces (index 0 = all)
+        mreq6 = struct.pack("16sI", socket.inet_pton(socket.AF_INET6, self.multicast_ip6), 0)
+        self.sock6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_JOIN_GROUP, mreq6)
+
+        # Set multicast hop limit for beacons (8 hops — enough for mesh + BR)
+        self.sock6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, 8)
+
+        self.sock6.setblocking(False)
+
+        # Build beacon destination address
+        self._beacon6_addr = (self.multicast_ip6, self.port, 0, 0)
+        self._last_beacon6 = 0
+        self._beacon_packet = build_beacon_packet()
+
+    def _send_beacon6(self):
+        """Send a beacon to the IPv6 multicast group so Thread devices know we're listening."""
+        if not self.sock6 or not self.multicast_ip6:
+            return
+        now = time.time()
+        if now - self._last_beacon6 < BEACON_INTERVAL:
+            return
+        try:
+            self.sock6.sendto(self._beacon_packet, self._beacon6_addr)
+            self._last_beacon6 = now
+        except Exception as e:
+            pass  # Best effort — don't spam errors for beacon failures
 
     def listen(self):
-        """Main listening loop."""
+        """Main listening loop using select() across IPv4 and IPv6 sockets."""
+        import select as sel
+
+        sockets = [self.sock]
+        if self.sock6:
+            sockets.append(self.sock6)
+
         while self.running:
             try:
-                data, addr = self.sock.recvfrom(1024)
-                self._handle_message(data, addr)
-            except socket.timeout:
-                # Periodically re-register mDNS service to ensure availability
+                readable, _, _ = sel.select(sockets, [], [], 1.0)
+
+                for s in readable:
+                    try:
+                        data, addr = s.recvfrom(1024)
+                        self._handle_message(data, addr)
+                    except Exception as e:
+                        if self.running:
+                            print(f"Error receiving data: {e}")
+
+                # Periodic maintenance
+                # Send IPv6 beacon so Thread devices know we're listening
+                if self.sock6:
+                    self._send_beacon6()
+
+                # Re-register mDNS for IPv4 ESP devices
                 if time.time() - self._last_mdns_registration > self._mdns_re_registration_interval:
                     if self.zeroconf and self.service_info:
                         try:
@@ -571,11 +673,11 @@ class ESPIoTLogReceiver:
                             self.zeroconf.register_service(self.service_info)
                             self._last_mdns_registration = time.time()
                         except Exception as e:
-                            print(f"⚠ mDNS re-registration failed: {e}")
-                continue  # Check running flag
+                            print(f"! mDNS re-registration failed: {e}")
+
             except Exception as e:
                 if self.running:
-                    print(f"Error receiving data: {e}")
+                    print(f"Error in listen loop: {e}")
 
     def _handle_message(self, data: bytes, addr):
         """Parse and display received log message."""
@@ -652,7 +754,10 @@ def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(description='ESP IoT Log Receiver')
     parser.add_argument('--ip', default=DEFAULT_MULTICAST_IP,
-                       help=f'Multicast IP address (default: {DEFAULT_MULTICAST_IP})')
+                       help=f'IPv4 multicast address (default: {DEFAULT_MULTICAST_IP})')
+    parser.add_argument('--ip6', nargs='?', const=DEFAULT_MULTICAST_IP6, default=None,
+                       help=f'Enable IPv6 multicast for Thread/OpenThread devices '
+                            f'(default: {DEFAULT_MULTICAST_IP6})')
     parser.add_argument('--port', type=int, default=DEFAULT_MULTICAST_PORT,
                        help=f'UDP port (default: {DEFAULT_MULTICAST_PORT})')
     parser.add_argument('--service', default=DEFAULT_SERVICE_NAME,
@@ -686,7 +791,8 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
 
     # Start receiver
-    with ESPIoTLogReceiver(args.ip, args.port, args.service, args.output, args.json) as receiver:
+    with ESPIoTLogReceiver(args.ip, args.port, args.service, args.output, args.json,
+                           multicast_ip6=args.ip6) as receiver:
         if receiver.start():
             try:
                 receiver.listen()

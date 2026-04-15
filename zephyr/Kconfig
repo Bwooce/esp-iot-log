@@ -1,0 +1,35 @@
+# ESP IoT Log - Zephyr Port
+
+menuconfig IOT_LOG
+	bool "IoT Log multicast logging"
+	depends on NET_SOCKETS
+	depends on NET_IPV6
+	depends on OPENTHREAD
+	help
+	  Enable multicast UDP logging over IPv6/OpenThread.
+	  Wire-compatible with the ESP IoT Log Python receiver.
+	  Sends to ff05::e510:4210 (site-local multicast).
+
+if IOT_LOG
+
+config IOT_LOG_DEFAULT_LEVEL
+	int "Default log level (0=none, 1=error, 2=warn, 3=info, 4=debug, 5=verbose)"
+	default 3
+	range 0 5
+
+config IOT_LOG_SERIAL_MIRROR
+	bool "Mirror logs to Zephyr LOG subsystem"
+	default y
+
+config IOT_LOG_MULTICAST_ADDR
+	string "IPv6 multicast address"
+	default "ff05::e510"
+	help
+	  Site-local scope (ff05::) ensures packets cross the Thread
+	  Border Router to the backbone LAN.
+
+config IOT_LOG_MULTICAST_PORT
+	int "UDP multicast port"
+	default 4210
+
+endif # IOT_LOG

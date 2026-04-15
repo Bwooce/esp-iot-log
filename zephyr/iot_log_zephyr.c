@@ -1,0 +1,486 @@
+/*
+ * ESP IoT Log - Zephyr/Thread Port
+ * Wire-compatible with the Arduino/ESP-IDF libraries.
+ *
+ * Sends binary log packets via IPv6 multicast over OpenThread.
+ * Uses Zephyr BSD sockets (works over the OpenThread IP stack).
+ *
+ * Key differences from ESP-IDF port:
+ *  - IPv6 multicast (ff05::e510) instead of IPv4 (239.255.1.100)
+ *  - Beacon-based discovery instead of mDNS (Thread has no mDNS).
+ *    Python receiver sends periodic beacons; device only logs when
+ *    a beacon has been recently received. Configurable always_on mode.
+ *  - Device ID from IEEE 802.15.4 EUI-64
+ *  - Thread-safe via Zephyr k_mutex
+ */
+
+#include "iot_log_zephyr.h"
+
+#include <zephyr/kernel.h>
+#include <zephyr/logging/log.h>
+#include <zephyr/net/socket.h>
+#include <zephyr/net/net_if.h>
+#include <zephyr/net/openthread.h>
+
+#include <openthread/thread.h>
+#include <openthread/link.h>
+#include <openthread/instance.h>
+
+#include <string.h>
+#include <stdio.h>
+
+LOG_MODULE_REGISTER(iot_log, LOG_LEVEL_INF);
+
+/* CRC16-CCITT (must match Arduino library and Python receiver) */
+static uint16_t crc16_ccitt(const uint8_t *data, size_t length)
+{
+    uint16_t crc = 0xFFFF;
+    for (size_t i = 0; i < length; i++) {
+        crc ^= (uint16_t)data[i] << 8;
+        for (int j = 0; j < 8; j++) {
+            if (crc & 0x8000) {
+                crc = (crc << 1) ^ 0x1021;
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+    return crc;
+}
+
+/* Internal state */
+static struct {
+    bool            initialised;
+    iot_log_level_t level;
+    bool            serial_mirror;
+    bool            always_on;
+    bool            listener_active;
+
+    int             sock;           /* TX socket (sendto multicast) */
+    int             rx_sock;        /* RX socket (recvfrom for beacons) */
+    struct sockaddr_in6 mcast_addr;
+
+    uint64_t        device_id;
+    char            device_name[32];
+
+    int64_t         last_beacon_ms; /* k_uptime when last beacon received */
+
+    uint32_t        sent_count;
+    uint32_t        dropped_count;
+} s_log;
+
+static K_MUTEX_DEFINE(s_log_mutex);
+
+/* Get device ID from OpenThread extended address (EUI-64) */
+static uint64_t get_device_id(void)
+{
+    uint64_t id = 0;
+    struct openthread_context *ot_context = openthread_get_default_context();
+
+    if (ot_context) {
+        openthread_api_mutex_lock(ot_context);
+        const otExtAddress *ext = otLinkGetExtendedAddress(ot_context->instance);
+        if (ext) {
+            /* Pack 8-byte EUI-64 into uint64_t, little-endian to match ESP MAC format */
+            for (int i = 7; i >= 0; i--) {
+                id = (id << 8) | ext->m8[i];
+            }
+        }
+        openthread_api_mutex_unlock(ot_context);
+    }
+
+    return id;
+}
+
+/* Check if Thread network is attached and has a routable address */
+static bool is_thread_attached(void)
+{
+    struct openthread_context *ot_context = openthread_get_default_context();
+    if (!ot_context) {
+        return false;
+    }
+
+    bool attached = false;
+    openthread_api_mutex_lock(ot_context);
+    otDeviceRole role = otThreadGetDeviceRole(ot_context->instance);
+    attached = (role == OT_DEVICE_ROLE_CHILD ||
+                role == OT_DEVICE_ROLE_ROUTER ||
+                role == OT_DEVICE_ROLE_LEADER);
+    openthread_api_mutex_unlock(ot_context);
+
+    return attached;
+}
+
+/* Check for beacon packets from the Python receiver (non-blocking) */
+static void check_for_beacons(void)
+{
+    if (s_log.rx_sock < 0) {
+        return;
+    }
+
+    uint8_t buf[32];
+    struct sockaddr_in6 src;
+    socklen_t src_len = sizeof(src);
+
+    /* Drain all pending beacon packets */
+    for (;;) {
+        ssize_t n = zsock_recvfrom(s_log.rx_sock, buf, sizeof(buf), ZSOCK_MSG_DONTWAIT,
+                                   (struct sockaddr *)&src, &src_len);
+        if (n <= 0) {
+            break;
+        }
+
+        /* Validate: at least header (18) + CRC (2) = 20 bytes */
+        if (n < 20) {
+            continue;
+        }
+
+        /* Check magic */
+        uint16_t magic = buf[0] | (buf[1] << 8);
+        if (magic != IOT_LOG_MAGIC) {
+            continue;
+        }
+
+        /* Check type = BEACON (0xFF)
+         * Header layout: magic(2) + ver(1) + devid(8) + ts(4) + type(1) + len(2) = 18
+         * log_type is at byte offset 15 */
+        uint8_t type = buf[15];
+        if (type == IOT_LOG_BEACON_TYPE) {
+            bool was_active = s_log.listener_active;
+            s_log.last_beacon_ms = k_uptime_get();
+            s_log.listener_active = true;
+            if (!was_active) {
+                LOG_INF("Log listener discovered via beacon");
+            }
+        }
+    }
+}
+
+/* Send a raw log message using the binary protocol */
+static bool send_message(iot_log_type_t type, const uint8_t *payload, size_t payload_len)
+{
+    if (!s_log.initialised) {
+        return false;
+    }
+
+    /* Check if we should send */
+    if (!is_thread_attached()) {
+        s_log.dropped_count++;
+        return false;
+    }
+
+    if (!s_log.always_on && !s_log.listener_active) {
+        s_log.dropped_count++;
+        return false;
+    }
+
+    /* Header: magic(2) + version(1) + device_id(8) + timestamp(4) + type(1) + length(2) = 18 */
+    const size_t HEADER_SIZE = 18;
+    size_t total_size = HEADER_SIZE + payload_len + 2; /* +2 for CRC16 */
+    if (total_size > 1024) {
+        s_log.dropped_count++;
+        return false;
+    }
+
+    uint8_t packet[1024];
+    size_t pos = 0;
+
+    /* Magic (little-endian) */
+    packet[pos++] = IOT_LOG_MAGIC & 0xFF;
+    packet[pos++] = (IOT_LOG_MAGIC >> 8) & 0xFF;
+
+    /* Protocol version */
+    packet[pos++] = IOT_LOG_PROTOCOL_VERSION;
+
+    /* Device ID (little-endian, 8 bytes) */
+    uint64_t did = s_log.device_id;
+    for (int i = 0; i < 8; i++) {
+        packet[pos++] = did & 0xFF;
+        did >>= 8;
+    }
+
+    /* Timestamp in ms (little-endian, 4 bytes) — Zephyr uptime */
+    uint32_t ts_ms = k_uptime_get_32();
+    packet[pos++] = ts_ms & 0xFF;
+    packet[pos++] = (ts_ms >> 8) & 0xFF;
+    packet[pos++] = (ts_ms >> 16) & 0xFF;
+    packet[pos++] = (ts_ms >> 24) & 0xFF;
+
+    /* Log type */
+    packet[pos++] = (uint8_t)type;
+
+    /* Payload length (little-endian, 2 bytes) */
+    packet[pos++] = payload_len & 0xFF;
+    packet[pos++] = (payload_len >> 8) & 0xFF;
+
+    /* Payload */
+    if (payload_len > 0) {
+        memcpy(packet + pos, payload, payload_len);
+    }
+
+    /* CRC16 over header + payload */
+    uint16_t crc = crc16_ccitt(packet, HEADER_SIZE + payload_len);
+    packet[HEADER_SIZE + payload_len]     = crc & 0xFF;
+    packet[HEADER_SIZE + payload_len + 1] = (crc >> 8) & 0xFF;
+
+    ssize_t sent = zsock_sendto(s_log.sock, packet, total_size, 0,
+                                (struct sockaddr *)&s_log.mcast_addr,
+                                sizeof(s_log.mcast_addr));
+    if (sent == (ssize_t)total_size) {
+        s_log.sent_count++;
+        return true;
+    } else {
+        s_log.dropped_count++;
+        return false;
+    }
+}
+
+int iot_log_init(const iot_log_config_t *config)
+{
+    if (s_log.initialised) {
+        return 0;
+    }
+
+    memset(&s_log, 0, sizeof(s_log));
+    s_log.sock = -1;
+    s_log.rx_sock = -1;
+
+    /* Apply config or defaults */
+    iot_log_config_t cfg = IOT_LOG_CONFIG_DEFAULT();
+    if (config) {
+        cfg = *config;
+    }
+
+    s_log.level = cfg.level;
+    s_log.serial_mirror = cfg.serial_mirror;
+    s_log.always_on = cfg.always_on;
+
+    /* Get device ID from Thread EUI-64 */
+    s_log.device_id = get_device_id();
+
+    /* Device name */
+    if (cfg.device_name) {
+        strncpy(s_log.device_name, cfg.device_name, sizeof(s_log.device_name) - 1);
+    } else {
+        snprintf(s_log.device_name, sizeof(s_log.device_name),
+                 "OT-%02X%02X%02X",
+                 (uint8_t)(s_log.device_id >> 16),
+                 (uint8_t)(s_log.device_id >> 8),
+                 (uint8_t)(s_log.device_id));
+    }
+
+    const char *mcast_ip = cfg.multicast_ip6 ? cfg.multicast_ip6 : IOT_LOG_DEFAULT_MCAST_IP6;
+    uint16_t mcast_port = cfg.multicast_port > 0 ? cfg.multicast_port : IOT_LOG_DEFAULT_MCAST_PORT;
+
+    /* Create TX socket (for sending log packets) */
+    s_log.sock = zsock_socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+    if (s_log.sock < 0) {
+        LOG_ERR("Failed to create TX UDP6 socket: %d", errno);
+        return -1;
+    }
+
+    /* Set multicast hop limit (8 — enough for mesh + border router) */
+    int hops = 8;
+    zsock_setsockopt(s_log.sock, IPPROTO_IPV6, IPV6_MULTICAST_HOPS,
+                     &hops, sizeof(hops));
+
+    /* Set up multicast destination */
+    memset(&s_log.mcast_addr, 0, sizeof(s_log.mcast_addr));
+    s_log.mcast_addr.sin6_family = AF_INET6;
+    s_log.mcast_addr.sin6_port = htons(mcast_port);
+    zsock_inet_pton(AF_INET6, mcast_ip, &s_log.mcast_addr.sin6_addr);
+
+    /* Create RX socket (for receiving beacons from Python receiver) */
+    if (!s_log.always_on) {
+        s_log.rx_sock = zsock_socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+        if (s_log.rx_sock < 0) {
+            LOG_WRN("Failed to create RX UDP6 socket: %d (beacon discovery disabled)", errno);
+            /* Fall back to always-on if we can't listen for beacons */
+            s_log.always_on = true;
+        } else {
+            /* Bind to the multicast port */
+            struct sockaddr_in6 bind_addr = {
+                .sin6_family = AF_INET6,
+                .sin6_port = htons(mcast_port),
+                .sin6_addr = IN6ADDR_ANY_INIT,
+            };
+            if (zsock_bind(s_log.rx_sock, (struct sockaddr *)&bind_addr,
+                           sizeof(bind_addr)) < 0) {
+                LOG_WRN("Failed to bind RX socket: %d", errno);
+                zsock_close(s_log.rx_sock);
+                s_log.rx_sock = -1;
+                s_log.always_on = true;
+            } else {
+                /* Join the multicast group to receive beacons */
+                struct ipv6_mreq mreq = { .ipv6mr_ifindex = 0 };
+                zsock_inet_pton(AF_INET6, mcast_ip, &mreq.ipv6mr_multiaddr);
+                zsock_setsockopt(s_log.rx_sock, IPPROTO_IPV6, IPV6_ADD_MEMBERSHIP,
+                                 &mreq, sizeof(mreq));
+            }
+        }
+    }
+
+    s_log.initialised = true;
+
+    LOG_INF("Initialised: %s -> [%s]:%d (%s)", s_log.device_name, mcast_ip, mcast_port,
+            s_log.always_on ? "always-on" : "beacon discovery");
+    return 0;
+}
+
+void iot_log_deinit(void)
+{
+    if (!s_log.initialised) {
+        return;
+    }
+
+    if (s_log.sock >= 0) {
+        zsock_close(s_log.sock);
+        s_log.sock = -1;
+    }
+
+    if (s_log.rx_sock >= 0) {
+        zsock_close(s_log.rx_sock);
+        s_log.rx_sock = -1;
+    }
+
+    s_log.initialised = false;
+    s_log.listener_active = false;
+}
+
+void iot_log_poll(void)
+{
+    if (!s_log.initialised) {
+        return;
+    }
+
+    /* Check for beacon packets */
+    if (!s_log.always_on) {
+        check_for_beacons();
+
+        /* Expire listener if no beacon received within timeout */
+        if (s_log.listener_active && s_log.last_beacon_ms > 0) {
+            int64_t elapsed = k_uptime_get() - s_log.last_beacon_ms;
+            if (elapsed > (int64_t)IOT_LOG_BEACON_TIMEOUT_S * 1000) {
+                s_log.listener_active = false;
+                LOG_INF("Log listener timed out (no beacon for %llds)",
+                        elapsed / 1000);
+            }
+        }
+    }
+}
+
+bool iot_log_is_active(void)
+{
+    if (!s_log.initialised || !is_thread_attached()) {
+        return false;
+    }
+    return s_log.always_on || s_log.listener_active;
+}
+
+void iot_log(iot_log_level_t level, const char *fmt, ...)
+{
+    if (!s_log.initialised || level > s_log.level) {
+        return;
+    }
+
+    char msg[512];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, args);
+    va_end(args);
+
+    /* Mirror to Zephyr LOG if enabled */
+    if (s_log.serial_mirror) {
+        switch (level) {
+        case IOT_LOG_ERROR:   LOG_ERR("%s", msg); break;
+        case IOT_LOG_WARN:    LOG_WRN("%s", msg); break;
+        case IOT_LOG_INFO:    LOG_INF("%s", msg); break;
+        case IOT_LOG_DEBUG:   LOG_DBG("%s", msg); break;
+        case IOT_LOG_VERBOSE: LOG_DBG("%s", msg); break;
+        default: break;
+        }
+    }
+
+    /* Send over network */
+    k_mutex_lock(&s_log_mutex, K_FOREVER);
+
+    size_t msg_len = strlen(msg);
+    if (msg_len > 500) {
+        msg_len = 500;
+    }
+
+    uint8_t payload[502];
+    payload[0] = (uint8_t)level;
+    memcpy(payload + 1, msg, msg_len);
+
+    send_message(IOT_LOG_TYPE_TEXT, payload, 1 + msg_len);
+
+    k_mutex_unlock(&s_log_mutex);
+}
+
+void iot_log_metric(const char *name, int32_t value)
+{
+    if (!s_log.initialised || !name || name[0] == '\0') {
+        return;
+    }
+
+    k_mutex_lock(&s_log_mutex, K_FOREVER);
+
+    size_t name_len = strlen(name);
+    if (name_len > 255) {
+        name_len = 255;
+    }
+
+    uint8_t payload[260];
+    payload[0] = (uint8_t)name_len;
+    memcpy(payload + 1, name, name_len);
+    payload[1 + name_len]     = (uint8_t)(value);
+    payload[1 + name_len + 1] = (uint8_t)(value >> 8);
+    payload[1 + name_len + 2] = (uint8_t)(value >> 16);
+    payload[1 + name_len + 3] = (uint8_t)(value >> 24);
+
+    send_message(IOT_LOG_TYPE_METRIC, payload, 1 + name_len + 4);
+
+    k_mutex_unlock(&s_log_mutex);
+}
+
+void iot_log_metric_str(const char *name, const char *value)
+{
+    if (!s_log.initialised || !name || name[0] == '\0') {
+        return;
+    }
+    if (!value) {
+        value = "";
+    }
+
+    k_mutex_lock(&s_log_mutex, K_FOREVER);
+
+    size_t name_len = strlen(name);
+    size_t value_len = strlen(value);
+    if (name_len > 255) {
+        name_len = 255;
+    }
+    if (value_len > 255) {
+        value_len = 255;
+    }
+
+    uint8_t payload[514];
+    payload[0] = (uint8_t)name_len;
+    memcpy(payload + 1, name, name_len);
+    payload[1 + name_len] = (uint8_t)value_len;
+    memcpy(payload + 2 + name_len, value, value_len);
+
+    send_message(IOT_LOG_TYPE_METRIC, payload, 2 + name_len + value_len);
+
+    k_mutex_unlock(&s_log_mutex);
+}
+
+uint32_t iot_log_get_sent_count(void)
+{
+    return s_log.sent_count;
+}
+
+uint32_t iot_log_get_dropped_count(void)
+{
+    return s_log.dropped_count;
+}
