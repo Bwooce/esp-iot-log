@@ -66,6 +66,8 @@ static struct {
     char            device_name[32];
 
     int64_t         last_beacon_ms; /* k_uptime when last beacon received */
+    bool            mcast_joined;  /* True once OT multicast subscription done */
+    char            mcast_ip[48];  /* Saved for deferred join */
 
     uint32_t        sent_count;
     uint32_t        dropped_count;
@@ -232,6 +234,11 @@ static bool send_message(iot_log_type_t type, const uint8_t *payload, size_t pay
         s_log.sent_count++;
         return true;
     } else {
+        if (s_log.dropped_count < 3) {
+            /* Log first few failures to diagnose, avoid spam */
+            LOG_WRN("sendto failed: %d (errno %d), total=%u",
+                    (int)sent, errno, s_log.dropped_count + 1);
+        }
         s_log.dropped_count++;
         return false;
     }
@@ -287,28 +294,10 @@ int iot_log_init(const iot_log_config_t *config)
     s_log.mcast_addr.sin6_port = htons(mcast_port);
     zsock_inet_pton(AF_INET6, mcast_ip, &s_log.mcast_addr.sin6_addr);
 
-    /* Subscribe to multicast group directly via OpenThread API.
-     * net_if_ipv6_maddr_add() doesn't propagate to OT without CONFIG_NET_MGMT,
-     * so we call otIp6SubscribeMulticastAddress() directly. This ensures:
-     *  1. Address is included in MLE Address Registration to parent
-     *  2. Parent (OTBR) proxies MLR.req to the Primary BBR
-     *  3. PBBR joins the group via MLDv2 on the backbone interface
-     *  4. Inbound multicast from the LAN flows into the Thread mesh */
-    {
-        struct openthread_context *ot_ctx = openthread_get_default_context();
-        if (ot_ctx) {
-            otIp6Address ot_mcast;
-            otIp6AddressFromString(mcast_ip, &ot_mcast);
-            openthread_api_mutex_lock(ot_ctx);
-            otError err = otIp6SubscribeMulticastAddress(ot_ctx->instance, &ot_mcast);
-            openthread_api_mutex_unlock(ot_ctx);
-            if (err == OT_ERROR_NONE || err == OT_ERROR_ALREADY) {
-                LOG_INF("Joined multicast group [%s]", mcast_ip);
-            } else {
-                LOG_WRN("Failed to join multicast group: %d", err);
-            }
-        }
-    }
+    /* Save multicast IP for deferred OT subscription.
+     * We can't subscribe until Thread is attached — the parent needs
+     * to proxy the MLR to the PBBR. Done in iot_log_poll(). */
+    strncpy(s_log.mcast_ip, mcast_ip, sizeof(s_log.mcast_ip) - 1);
 
     /* Create RX socket (for receiving beacons from Python receiver) */
     if (!s_log.always_on) {
@@ -365,6 +354,27 @@ void iot_log_poll(void)
 {
     if (!s_log.initialised) {
         return;
+    }
+
+    /* Deferred multicast join — must happen after Thread attaches so
+     * the parent can include ff05::e510 in Address Registration and
+     * proxy MLR.req to the PBBR. The PBBR then joins the group on
+     * the backbone via MLDv2, enabling inbound multicast forwarding. */
+    if (!s_log.mcast_joined && is_thread_attached()) {
+        struct openthread_context *ot_ctx = openthread_get_default_context();
+        if (ot_ctx) {
+            otIp6Address ot_mcast;
+            otIp6AddressFromString(s_log.mcast_ip, &ot_mcast);
+            openthread_api_mutex_lock(ot_ctx);
+            otError err = otIp6SubscribeMulticastAddress(ot_ctx->instance, &ot_mcast);
+            openthread_api_mutex_unlock(ot_ctx);
+            if (err == OT_ERROR_NONE || err == OT_ERROR_ALREADY) {
+                LOG_INF("Joined multicast group [%s]", s_log.mcast_ip);
+                s_log.mcast_joined = true;
+            } else {
+                LOG_WRN("Failed to join multicast group: %d", err);
+            }
+        }
     }
 
     /* Check for beacon packets */
