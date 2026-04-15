@@ -692,6 +692,9 @@ class ESPIoTLogReceiver:
             if magic != LOG_MAGIC:
                 return  # Not our protocol
 
+            if log_type == BEACON_TYPE:
+                return  # Ignore beacons (our own or from other receivers)
+
             header = {
                 'magic': magic,
                 'version': version,

@@ -25,6 +25,7 @@
 
 #include <openthread/thread.h>
 #include <openthread/link.h>
+#include <openthread/ip6.h>
 #include <openthread/instance.h>
 
 #include <string.h>
@@ -286,19 +287,26 @@ int iot_log_init(const iot_log_config_t *config)
     s_log.mcast_addr.sin6_port = htons(mcast_port);
     zsock_inet_pton(AF_INET6, mcast_ip, &s_log.mcast_addr.sin6_addr);
 
-    /* Join the multicast group at the network interface level.
-     * Zephyr doesn't expose IPV6_ADD_MEMBERSHIP via setsockopt —
-     * use net_if_ipv6_maddr_add() instead. This registers the
-     * multicast address so the Thread stack knows to receive it. */
+    /* Subscribe to multicast group directly via OpenThread API.
+     * net_if_ipv6_maddr_add() doesn't propagate to OT without CONFIG_NET_MGMT,
+     * so we call otIp6SubscribeMulticastAddress() directly. This ensures:
+     *  1. Address is included in MLE Address Registration to parent
+     *  2. Parent (OTBR) proxies MLR.req to the Primary BBR
+     *  3. PBBR joins the group via MLDv2 on the backbone interface
+     *  4. Inbound multicast from the LAN flows into the Thread mesh */
     {
-        struct net_if *iface = net_if_get_default();
-        struct in6_addr mcast_in6;
-        zsock_inet_pton(AF_INET6, mcast_ip, &mcast_in6);
-        struct net_if_mcast_addr *maddr = net_if_ipv6_maddr_add(iface, &mcast_in6);
-        if (maddr) {
-            LOG_INF("Joined multicast group [%s]", mcast_ip);
-        } else {
-            LOG_WRN("Failed to join multicast group (may already be joined)");
+        struct openthread_context *ot_ctx = openthread_get_default_context();
+        if (ot_ctx) {
+            otIp6Address ot_mcast;
+            otIp6AddressFromString(mcast_ip, &ot_mcast);
+            openthread_api_mutex_lock(ot_ctx);
+            otError err = otIp6SubscribeMulticastAddress(ot_ctx->instance, &ot_mcast);
+            openthread_api_mutex_unlock(ot_ctx);
+            if (err == OT_ERROR_NONE || err == OT_ERROR_ALREADY) {
+                LOG_INF("Joined multicast group [%s]", mcast_ip);
+            } else {
+                LOG_WRN("Failed to join multicast group: %d", err);
+            }
         }
     }
 
