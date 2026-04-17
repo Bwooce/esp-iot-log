@@ -64,6 +64,10 @@ static void process(const struct log_backend *const backend,
     msg_pos = 0;
     uint32_t flags = 0;
     log_format_func_t log_output_func = log_format_func_t_get(LOG_OUTPUT_TEXT);
+    if (log_output_func == NULL) {
+        /* Text formatter not available (CONFIG_LOG_OUTPUT_FORMAT_TEXT disabled) */
+        return;
+    }
     log_output_func(&log_output_iot, &msg->log, flags);
 
     if (msg_pos == 0) {
