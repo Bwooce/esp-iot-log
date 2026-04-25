@@ -265,19 +265,30 @@ static void iot_log_poll_work_handler(struct k_work *work)
 {
     ARG_UNUSED(work);
     iot_log_poll();
-    /* Heartbeat every ~30s so we can see whether the workqueue is firing
-     * and whether sendto is actually getting packets out. Diagnostic; can
-     * drop later. */
-    static uint32_t tick_count = 0;
-    if (s_log.initialised && (++tick_count % 30) == 0) {
-        LOG_INF("hb: tick=%u sent=%u drop=%u attached=%d active=%d",
-                (unsigned)tick_count,
-                (unsigned)s_log.sent_count,
-                (unsigned)s_log.dropped_count,
-                (int)is_thread_attached(),
-                (int)s_log.listener_active);
-    }
+
+    /* Log only when state changes (listener-active edge, attachment edge,
+     * or drops have grown) so we get visibility into something going wrong
+     * without spamming the log when everything's fine. */
     if (s_log.initialised) {
+        static int8_t  prev_attached = -1;
+        static int8_t  prev_active = -1;
+        static uint32_t prev_dropped = 0;
+        bool attached_now = is_thread_attached();
+        bool active_now = s_log.listener_active;
+        bool emit = (prev_attached != (int8_t)attached_now) ||
+                    (prev_active != (int8_t)active_now) ||
+                    (s_log.dropped_count > prev_dropped);
+        if (emit) {
+            LOG_INF("status: sent=%u drop=%u attached=%d active=%d",
+                    (unsigned)s_log.sent_count,
+                    (unsigned)s_log.dropped_count,
+                    (int)attached_now,
+                    (int)active_now);
+            prev_attached = attached_now;
+            prev_active = active_now;
+            prev_dropped = s_log.dropped_count;
+        }
+
         k_work_reschedule(&iot_log_poll_work, IOT_LOG_POLL_INTERVAL);
     }
 }
