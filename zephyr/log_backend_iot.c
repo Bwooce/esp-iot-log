@@ -113,7 +113,16 @@ static const struct log_backend_api log_backend_iot_api = {
     .init = init,
 };
 
-LOG_BACKEND_DEFINE(log_backend_iot, log_backend_iot_api, true);
+/* autostart=false: caller must enable via log_backend_enable() once
+ * iot_log_init() has run AND networking (Thread) is up. Otherwise this
+ * backend's process() returns silently when iot_log isn't active —
+ * which CONSUMES the message from the deferred-log subsystem (refcount
+ * decremented, message freed) before any other backend (e.g. UART)
+ * gets a chance to deliver it. With autostart off, messages stay
+ * queued for delivery once a working backend is enabled.
+ *
+ * Activation happens in iot_log_init() (iot_log_zephyr.c). */
+LOG_BACKEND_DEFINE(log_backend_iot, log_backend_iot_api, false);
 
 /* Called from iot_log_poll() in the main thread to drain queued messages. */
 void iot_log_backend_drain(void)

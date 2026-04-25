@@ -28,6 +28,9 @@
 #include <openthread/ip6.h>
 #include <openthread/instance.h>
 
+#include <zephyr/logging/log_ctrl.h>     /* log_backend_get_by_name */
+#include <zephyr/logging/log_backend.h>  /* struct log_backend */
+
 #include <string.h>
 #include <stdio.h>
 
@@ -188,7 +191,11 @@ static bool send_message(iot_log_type_t type, const uint8_t *payload, size_t pay
         return false;
     }
 
-    uint8_t packet[1024];
+    /* Static — protected by s_log_mutex which all callers hold. Keeping this
+     * off the workqueue stack matters: system_workq is only 2KB on this
+     * platform, and a 1KB stack buffer in this path crashed the device with
+     * a MemManage fault during heavy iot_log activity. */
+    static uint8_t packet[1024];
     size_t pos = 0;
 
     /* Magic (little-endian) */
@@ -243,6 +250,23 @@ static bool send_message(iot_log_type_t type, const uint8_t *payload, size_t pay
         }
         s_log.dropped_count++;
         return false;
+    }
+}
+
+/* Self-driving poll work — keeps draining and beacon-checking even when the
+ * application is blocked in a long-running call (DNS, TLS handshake, etc.).
+ * Without this, the optimistic-grace window can expire while messages sit
+ * undelivered in the ring buffer, and they'd be dropped at drain time. */
+#define IOT_LOG_POLL_INTERVAL K_MSEC(1000)
+static void iot_log_poll_work_handler(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(iot_log_poll_work, iot_log_poll_work_handler);
+
+static void iot_log_poll_work_handler(struct k_work *work)
+{
+    ARG_UNUSED(work);
+    iot_log_poll();
+    if (s_log.initialised) {
+        k_work_reschedule(&iot_log_poll_work, IOT_LOG_POLL_INTERVAL);
     }
 }
 
@@ -327,6 +351,24 @@ int iot_log_init(const iot_log_config_t *config)
 
     s_log.initialised = true;
 
+    /* Activate the log backend now that sockets and state are ready.
+     * The backend was registered with autostart=false in
+     * log_backend_iot.c so that pre-init log messages aren't silently
+     * consumed and dropped before networking is up — they stay queued
+     * in the deferred log buffer for delivery once a backend is
+     * actually capable of handling them. */
+    {
+        const struct log_backend *be = log_backend_get_by_name("log_backend_iot");
+        if (be) {
+            log_backend_enable(be, be->cb->ctx, CONFIG_LOG_DEFAULT_LEVEL);
+        }
+    }
+
+    /* Self-drive poll() so messages flow during long blocking phases
+     * (DNS resolve, TLS handshake) instead of waiting for the app to
+     * call iot_log_poll() from its main loop. */
+    k_work_schedule(&iot_log_poll_work, IOT_LOG_POLL_INTERVAL);
+
     LOG_INF("Initialised: %s -> [%s]:%d (%s)", s_log.device_name, mcast_ip, mcast_port,
             s_log.always_on ? "always-on" : "beacon discovery");
     return 0;
@@ -391,13 +433,24 @@ void iot_log_poll(void)
         }
     }
 
-    /* Check for beacon packets */
+    /* Check for beacon packets first — beacons that arrive in the same poll
+     * tick as the timeout check should refresh listener_active before any
+     * expiry decision. */
     if (!s_log.always_on) {
         check_for_beacons();
+    }
 
-        /* Expire listener if no beacon received within timeout.
-         * Uses shorter grace period until first real beacon arrives,
-         * then the normal 3x-interval timeout after that. */
+    /* Drain queued log messages from the Zephyr log backend BEFORE the
+     * timeout check. If poll() hasn't run for a while (e.g. blocked in TLS
+     * handshake), we can have a backlog of messages queued under the still-
+     * valid optimistic-grace listener. Expiring the listener first would
+     * cause those messages to be dropped at send time. Drain → then expire. */
+    iot_log_backend_drain();
+
+    /* Expire listener if no beacon received within timeout.
+     * Uses shorter grace period until first real beacon arrives,
+     * then the normal 3x-interval timeout after that. */
+    if (!s_log.always_on) {
         if (s_log.listener_active && s_log.last_beacon_ms > 0) {
             int64_t elapsed = k_uptime_get() - s_log.last_beacon_ms;
             int64_t timeout = s_log.beacon_confirmed ?
@@ -411,11 +464,6 @@ void iot_log_poll(void)
             }
         }
     }
-
-    /* Drain queued log messages from the Zephyr log backend.
-     * The backend queues to a ring buffer (logging thread has small stack),
-     * and we send from here in the main thread where stack is safe. */
-    iot_log_backend_drain();
 }
 
 bool iot_log_is_active(void)
@@ -479,7 +527,8 @@ bool iot_log_send_raw(iot_log_level_t level, const char *msg, size_t len)
         len = 500;
     }
 
-    uint8_t payload[502];
+    /* Static — protected by s_log_mutex. See note in send_message. */
+    static uint8_t payload[502];
     payload[0] = (uint8_t)level;
     memcpy(payload + 1, msg, len);
 
