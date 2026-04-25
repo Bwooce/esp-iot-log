@@ -28,6 +28,11 @@
 #include <openthread/ip6.h>
 #include <openthread/instance.h>
 
+/* v3.3: openthread_context.instance is no longer populated by the L2 layer.
+ * The new singleton accessor lives in the openthread module's internal
+ * header which we don't pull in directly. Forward-declare here. */
+struct otInstance *openthread_get_default_instance(void);
+
 #include <zephyr/logging/log_ctrl.h>     /* log_backend_get_by_name */
 #include <zephyr/logging/log_backend.h>  /* struct log_backend */
 
@@ -87,7 +92,7 @@ static uint64_t get_device_id(void)
 
     if (ot_context) {
         openthread_api_mutex_lock(ot_context);
-        const otExtAddress *ext = otLinkGetExtendedAddress(ot_context->instance);
+        const otExtAddress *ext = otLinkGetExtendedAddress(openthread_get_default_instance());
         if (ext) {
             /* Pack 8-byte EUI-64 into uint64_t, little-endian to match ESP MAC format */
             for (int i = 7; i >= 0; i--) {
@@ -110,7 +115,7 @@ static bool is_thread_attached(void)
 
     bool attached = false;
     openthread_api_mutex_lock(ot_context);
-    otDeviceRole role = otThreadGetDeviceRole(ot_context->instance);
+    otDeviceRole role = otThreadGetDeviceRole(openthread_get_default_instance());
     attached = (role == OT_DEVICE_ROLE_CHILD ||
                 role == OT_DEVICE_ROLE_ROUTER ||
                 role == OT_DEVICE_ROLE_LEADER);
@@ -436,7 +441,7 @@ void iot_log_poll(void)
             otIp6Address ot_mcast;
             otIp6AddressFromString(s_log.mcast_ip, &ot_mcast);
             openthread_api_mutex_lock(ot_ctx);
-            otError err = otIp6SubscribeMulticastAddress(ot_ctx->instance, &ot_mcast);
+            otError err = otIp6SubscribeMulticastAddress(openthread_get_default_instance(), &ot_mcast);
             openthread_api_mutex_unlock(ot_ctx);
             if (err == OT_ERROR_NONE || err == OT_ERROR_ALREADY) {
                 LOG_INF("Joined multicast group [%s]", s_log.mcast_ip);
