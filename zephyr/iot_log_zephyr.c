@@ -265,6 +265,18 @@ static void iot_log_poll_work_handler(struct k_work *work)
 {
     ARG_UNUSED(work);
     iot_log_poll();
+    /* Heartbeat every ~30s so we can see whether the workqueue is firing
+     * and whether sendto is actually getting packets out. Diagnostic; can
+     * drop later. */
+    static uint32_t tick_count = 0;
+    if (s_log.initialised && (++tick_count % 30) == 0) {
+        LOG_INF("hb: tick=%u sent=%u drop=%u attached=%d active=%d",
+                (unsigned)tick_count,
+                (unsigned)s_log.sent_count,
+                (unsigned)s_log.dropped_count,
+                (int)is_thread_attached(),
+                (int)s_log.listener_active);
+    }
     if (s_log.initialised) {
         k_work_reschedule(&iot_log_poll_work, IOT_LOG_POLL_INTERVAL);
     }

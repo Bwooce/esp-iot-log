@@ -24,11 +24,13 @@
 
 /* Ring buffer for queued log messages.
  * Each entry: 1 byte level + 2 bytes length + message text.
- * 2KB holds ~10-20 typical log messages. */
+ * 2KB holds ~10-20 typical log messages.
+ *
+ * Auto-initialised at compile time so it works regardless of whether the
+ * backend's init() callback runs. With autostart=false, log_backend_enable()
+ * doesn't actually invoke init(), so we can't rely on the runtime init path. */
 #define IOT_LOG_RING_SIZE 2048
-static uint8_t ring_data[IOT_LOG_RING_SIZE];
-static struct ring_buf ring;
-static bool ring_inited;
+RING_BUF_DECLARE(ring, IOT_LOG_RING_SIZE);
 
 /* Output buffer for log formatting (logging thread is single-threaded). */
 static uint8_t log_buf[512];
@@ -55,7 +57,7 @@ LOG_OUTPUT_DEFINE(log_output_iot, char_out, log_buf, sizeof(log_buf));
 static void process(const struct log_backend *const backend,
                     union log_msg_generic *msg)
 {
-    if (!iot_log_is_active() || !ring_inited) {
+    if (!iot_log_is_active()) {
         return;
     }
 
@@ -101,16 +103,11 @@ static void panic(const struct log_backend *const backend)
 {
 }
 
-static void init(const struct log_backend *const backend)
-{
-    ring_buf_init(&ring, sizeof(ring_data), ring_data);
-    ring_inited = true;
-}
-
 static const struct log_backend_api log_backend_iot_api = {
     .process = process,
     .panic = panic,
-    .init = init,
+    /* No init — RING_BUF_DECLARE handles ring init at compile time, and
+     * log_backend_enable() doesn't invoke init() anyway. */
 };
 
 /* autostart=false: caller must enable via log_backend_enable() once
@@ -127,10 +124,6 @@ LOG_BACKEND_DEFINE(log_backend_iot, log_backend_iot_api, false);
 /* Called from iot_log_poll() in the main thread to drain queued messages. */
 void iot_log_backend_drain(void)
 {
-    if (!ring_inited) {
-        return;
-    }
-
     uint8_t header[3];
     while (ring_buf_size_get(&ring) >= 3) {
         /* Peek header */
