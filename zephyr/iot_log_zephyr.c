@@ -278,20 +278,43 @@ static void iot_log_poll_work_handler(struct k_work *work)
         static int8_t  prev_attached = -1;
         static int8_t  prev_active = -1;
         static uint32_t prev_dropped = 0;
+        static uint32_t prev_calls = 0;
+        static uint32_t prev_queued = 0;
         bool attached_now = is_thread_attached();
         bool active_now = s_log.listener_active;
+
+        /* Pull backend stats so the status emit can show why messages
+         * aren't flowing when sent_count stays at 0. */
+        uint32_t be_calls = 0, be_inactive = 0, be_no_fmt = 0;
+        uint32_t be_zero_len = 0, be_queued = 0, be_ring_full = 0;
+        log_backend_iot_get_stats(&be_calls, &be_inactive, &be_no_fmt,
+                                  &be_zero_len, &be_queued, &be_ring_full);
+
+        /* Emit on state edges, on app-side drops, or when the backend has
+         * seen new calls but couldn't queue any of them — that last case
+         * is the "log subsystem is calling us but we're rejecting" failure
+         * mode (most often `bail_inactive` during pre-attach boot, but
+         * also `ring_full` if drain can't keep up). Steady-state success
+         * (calls climbing, queued climbing in lockstep) stays quiet. */
         bool emit = (prev_attached != (int8_t)attached_now) ||
                     (prev_active != (int8_t)active_now) ||
-                    (s_log.dropped_count > prev_dropped);
+                    (s_log.dropped_count > prev_dropped) ||
+                    (be_calls > prev_calls && be_queued == prev_queued);
         if (emit) {
-            LOG_INF("status: sent=%u drop=%u attached=%d active=%d",
+            LOG_INF("status: sent=%u drop=%u attached=%d active=%d "
+                    "be[calls=%u inactive=%u nofmt=%u zlen=%u queued=%u rfull=%u]",
                     (unsigned)s_log.sent_count,
                     (unsigned)s_log.dropped_count,
                     (int)attached_now,
-                    (int)active_now);
+                    (int)active_now,
+                    (unsigned)be_calls, (unsigned)be_inactive,
+                    (unsigned)be_no_fmt, (unsigned)be_zero_len,
+                    (unsigned)be_queued, (unsigned)be_ring_full);
             prev_attached = attached_now;
             prev_active = active_now;
             prev_dropped = s_log.dropped_count;
+            prev_calls = be_calls;
+            prev_queued = be_queued;
         }
 
         k_work_reschedule(&iot_log_poll_work, IOT_LOG_POLL_INTERVAL);
@@ -384,10 +407,21 @@ int iot_log_init(const iot_log_config_t *config)
      * log_backend_iot.c so that pre-init log messages aren't silently
      * consumed and dropped before networking is up — they stay queued
      * in the deferred log buffer for delivery once a backend is
-     * actually capable of handling them. */
+     * actually capable of handling them.
+     *
+     * IMPORTANT: log_backend_init() MUST be called before
+     * log_backend_enable(). Without init, the backend never gets a
+     * runtime ID assigned via log_backend_id_set(), so the per-backend
+     * filter table doesn't route messages to our process() callback —
+     * Zephyr's log_core.c only auto-inits backends declared with
+     * autostart=true (log_core.c:346). Calling enable() alone sets
+     * cb->active=true and lets a few process() calls through during
+     * the brief window before filters lock in, then it goes silent
+     * forever (was the symptom: be[calls=23 inactive=23, queued=0]). */
     {
         const struct log_backend *be = log_backend_get_by_name("log_backend_iot");
         if (be) {
+            log_backend_init(be);
             log_backend_enable(be, be->cb->ctx, CONFIG_LOG_DEFAULT_LEVEL);
         }
     }

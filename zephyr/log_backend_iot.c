@@ -39,6 +39,28 @@ static uint8_t log_buf[512];
 static char msg_buf[500];
 static size_t msg_pos;
 
+/* Diagnostic counters — exposed via log_backend_iot_get_stats() so the
+ * periodic status emit in iot_log_zephyr.c can show why messages aren't
+ * flowing when sent_count stays at 0. */
+static uint32_t s_process_calls;
+static uint32_t s_process_bail_inactive;
+static uint32_t s_process_bail_no_fmt;
+static uint32_t s_process_bail_zero_len;
+static uint32_t s_process_queued;
+static uint32_t s_process_ring_full;
+
+void log_backend_iot_get_stats(uint32_t *calls, uint32_t *bail_inactive,
+                                uint32_t *bail_no_fmt, uint32_t *bail_zero_len,
+                                uint32_t *queued, uint32_t *ring_full)
+{
+    if (calls) *calls = s_process_calls;
+    if (bail_inactive) *bail_inactive = s_process_bail_inactive;
+    if (bail_no_fmt) *bail_no_fmt = s_process_bail_no_fmt;
+    if (bail_zero_len) *bail_zero_len = s_process_bail_zero_len;
+    if (queued) *queued = s_process_queued;
+    if (ring_full) *ring_full = s_process_ring_full;
+}
+
 static int char_out(uint8_t *data, size_t length, void *ctx)
 {
     ARG_UNUSED(ctx);
@@ -57,7 +79,9 @@ LOG_OUTPUT_DEFINE(log_output_iot, char_out, log_buf, sizeof(log_buf));
 static void process(const struct log_backend *const backend,
                     union log_msg_generic *msg)
 {
+    s_process_calls++;
     if (!iot_log_is_active()) {
+        s_process_bail_inactive++;
         return;
     }
 
@@ -68,11 +92,13 @@ static void process(const struct log_backend *const backend,
     log_format_func_t log_output_func = log_format_func_t_get(LOG_OUTPUT_TEXT);
     if (log_output_func == NULL) {
         /* Text formatter not available (CONFIG_LOG_OUTPUT_FORMAT_TEXT disabled) */
+        s_process_bail_no_fmt++;
         return;
     }
     log_output_func(&log_output_iot, &msg->log, flags);
 
     if (msg_pos == 0) {
+        s_process_bail_zero_len++;
         return;
     }
 
@@ -95,6 +121,9 @@ static void process(const struct log_backend *const backend,
     if (ring_buf_space_get(&ring) >= needed) {
         ring_buf_put(&ring, header, 3);
         ring_buf_put(&ring, (uint8_t *)msg_buf, len);
+        s_process_queued++;
+    } else {
+        s_process_ring_full++;
     }
     /* If ring full, silently drop — better than crashing */
 }

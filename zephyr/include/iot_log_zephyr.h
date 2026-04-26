@@ -140,6 +140,21 @@ bool iot_log_send_raw(iot_log_level_t level, const char *msg, size_t len);
 uint32_t iot_log_get_sent_count(void);
 uint32_t iot_log_get_dropped_count(void);
 
+/**
+ * Get Zephyr log-backend stats (defined in log_backend_iot.c).
+ * Pass NULL for any counter you don't care about.
+ *
+ * - calls:           total times process() was invoked by the log subsystem.
+ * - bail_inactive:   bailed because iot_log_is_active() returned false.
+ * - bail_no_fmt:     bailed because LOG_OUTPUT_TEXT formatter wasn't compiled in.
+ * - bail_zero_len:   formatter ran but produced 0 bytes (shouldn't happen).
+ * - queued:          successfully queued into the ring buffer.
+ * - ring_full:       ring buffer was full at queue time, message dropped.
+ */
+void log_backend_iot_get_stats(uint32_t *calls, uint32_t *bail_inactive,
+                                uint32_t *bail_no_fmt, uint32_t *bail_zero_len,
+                                uint32_t *queued, uint32_t *ring_full);
+
 #ifdef __cplusplus
 }
 #endif
