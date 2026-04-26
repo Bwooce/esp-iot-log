@@ -365,6 +365,20 @@ int iot_log_init(const iot_log_config_t *config)
         return -1;
     }
 
+    /* Bump multicast hop limit so packets survive the OTBR's kernel
+     * mc-forwarder. Linux's ip6mr_forward2() drops the packet if
+     * hop_limit <= 1 BEFORE decrementing — and silently increments the
+     * mc_cache Pkts counter regardless. The default Zephyr/RFC-3493
+     * IPV6_MULTICAST_HOPS is 1, so every iot_log packet was being
+     * "counted as forwarded" but actually dropped at the BBR. Setting
+     * this to 8 lets the BBR forward (decremented to 7), the AP
+     * bridges to wifi (no further decrement), receiver gets hlim=7. */
+    int hops = 8;
+    if (zsock_setsockopt(s_log.sock, IPPROTO_IPV6, IPV6_MULTICAST_HOPS,
+                         &hops, sizeof(hops)) < 0) {
+        LOG_WRN("Failed to set IPV6_MULTICAST_HOPS: %d", errno);
+    }
+
     /* Set up multicast destination */
     memset(&s_log.mcast_addr, 0, sizeof(s_log.mcast_addr));
     s_log.mcast_addr.sin6_family = AF_INET6;
