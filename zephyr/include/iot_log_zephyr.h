@@ -37,6 +37,11 @@ extern "C" {
 #define IOT_LOG_BEACON_TYPE        0xFF
 #define IOT_LOG_BEACON_TIMEOUT_S   90   /* 3x beacon interval */
 #define IOT_LOG_BEACON_GRACE_S     60   /* Send optimistically after attach */
+/* While listener is inactive, periodically unsubscribe+resubscribe the
+ * multicast group so a fresh MLE Address Registration is sent to the
+ * (possibly new) parent. Recovers from parents that silently drop our
+ * multicast forwarding state across re-attaches. */
+#define IOT_LOG_MLR_REFRESH_S      120
 
 /* Log levels (match Arduino/ESP-IDF libraries) */
 typedef enum {

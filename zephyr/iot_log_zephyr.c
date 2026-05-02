@@ -74,6 +74,7 @@ static struct {
     char            device_name[32];
 
     int64_t         last_beacon_ms; /* k_uptime when last beacon received */
+    int64_t         last_resubscribe_ms; /* k_uptime of last MLR refresh */
     bool            mcast_joined;  /* True once OT multicast subscription done */
     bool            beacon_confirmed; /* True after first real beacon received */
     char            mcast_ip[48];  /* Saved for deferred join */
@@ -170,8 +171,11 @@ static void check_for_beacons(void)
     }
 }
 
-/* Send a raw log message using the binary protocol */
-static bool send_message(iot_log_type_t type, const uint8_t *payload, size_t payload_len)
+/* Send a raw log message using the binary protocol.
+ * `force=true` bypasses the listener-active gate (still requires Thread
+ * attached). Used for one-shot "going silent" announcements that must reach
+ * the receiver even when the device is about to mute itself. */
+static bool send_message(iot_log_type_t type, const uint8_t *payload, size_t payload_len, bool force)
 {
     if (!s_log.initialised) {
         return false;
@@ -183,7 +187,7 @@ static bool send_message(iot_log_type_t type, const uint8_t *payload, size_t pay
         return false;
     }
 
-    if (!s_log.always_on && !s_log.listener_active) {
+    if (!s_log.always_on && !s_log.listener_active && !force) {
         s_log.dropped_count++;
         return false;
     }
@@ -256,6 +260,43 @@ static bool send_message(iot_log_type_t type, const uint8_t *payload, size_t pay
         s_log.dropped_count++;
         return false;
     }
+}
+
+/* Send a one-shot text message bypassing the listener-active gate. Used
+ * to announce state transitions (e.g. "going silent") that must reach the
+ * receiver even when the device is about to mute itself. */
+static void send_text_force(iot_log_level_t level, const char *msg)
+{
+    if (!s_log.initialised) {
+        return;
+    }
+    size_t len = strlen(msg);
+    if (len > 500) {
+        len = 500;
+    }
+    k_mutex_lock(&s_log_mutex, K_FOREVER);
+    static uint8_t payload[502];
+    payload[0] = (uint8_t)level;
+    memcpy(payload + 1, msg, len);
+    send_message(IOT_LOG_TYPE_TEXT, payload, 1 + len, true);
+    k_mutex_unlock(&s_log_mutex);
+}
+
+/* Unsubscribe + re-subscribe ff05::e510 so a fresh MLE Address Registration
+ * is sent to the (possibly new) parent. Returns true on success. */
+static bool refresh_mlr(void)
+{
+    struct openthread_context *ot_ctx = openthread_get_default_context();
+    if (!ot_ctx) {
+        return false;
+    }
+    otIp6Address ot_mcast;
+    otIp6AddressFromString(s_log.mcast_ip, &ot_mcast);
+    openthread_api_mutex_lock(ot_ctx);
+    otIp6UnsubscribeMulticastAddress(openthread_get_default_instance(), &ot_mcast);
+    otError err = otIp6SubscribeMulticastAddress(openthread_get_default_instance(), &ot_mcast);
+    openthread_api_mutex_unlock(ot_ctx);
+    return (err == OT_ERROR_NONE || err == OT_ERROR_ALREADY);
 }
 
 /* Self-driving poll work — keeps draining and beacon-checking even when the
@@ -533,10 +574,56 @@ void iot_log_poll(void)
                 (int64_t)IOT_LOG_BEACON_TIMEOUT_S * 1000 :
                 (int64_t)IOT_LOG_BEACON_GRACE_S * 1000;
             if (elapsed > timeout) {
+                /* Emit the going-silent banner via the force path BEFORE
+                 * flipping the flag — otherwise the deferred LOG_INF below
+                 * gets dropped at the backend's listener-active gate, and
+                 * the outage looks identical to a hard fault from the
+                 * receiver's side. */
+                char banner[96];
+                int n = snprintf(banner, sizeof(banner),
+                                 "iot_log: listener timed out (%s, %llds) — going silent",
+                                 s_log.beacon_confirmed ? "no beacon" : "grace expired",
+                                 elapsed / 1000);
+                if (n > 0) {
+                    send_text_force(IOT_LOG_INFO, banner);
+                }
                 s_log.listener_active = false;
+                /* Reset MLR-refresh phase so the first refresh fires soon
+                 * (within IOT_LOG_MLR_REFRESH_S) rather than instantly. */
+                s_log.last_resubscribe_ms = k_uptime_get();
                 LOG_INF("Log listener timed out (%s, %llds)",
                         s_log.beacon_confirmed ? "no beacon" : "grace expired",
                         elapsed / 1000);
+            }
+        }
+
+        /* MLR self-heal: while listener is inactive, periodically refresh
+         * our multicast subscription so a fresh MLE Address Registration
+         * reaches the parent. Some parents (observed: third-party Thread
+         * routers) silently drop our inbound multicast forwarding state
+         * across a re-attach, leaving outbound mcast working but inbound
+         * silently broken. After each refresh, give the optimistic-grace
+         * window a chance to re-confirm via real beacons. */
+        if (!s_log.listener_active && s_log.mcast_joined && is_thread_attached()) {
+            int64_t now = k_uptime_get();
+            if (s_log.last_resubscribe_ms == 0 ||
+                (now - s_log.last_resubscribe_ms) >= (int64_t)IOT_LOG_MLR_REFRESH_S * 1000) {
+                if (refresh_mlr()) {
+                    s_log.last_resubscribe_ms = now;
+                    s_log.last_beacon_ms = now;
+                    s_log.listener_active = true;
+                    char banner[96];
+                    int n = snprintf(banner, sizeof(banner),
+                                     "iot_log: MLR refresh — re-asserting %s subscription",
+                                     s_log.mcast_ip);
+                    if (n > 0) {
+                        send_text_force(IOT_LOG_INFO, banner);
+                    }
+                    LOG_INF("MLR refresh on [%s]; %ds optimistic grace",
+                            s_log.mcast_ip,
+                            s_log.beacon_confirmed ? IOT_LOG_BEACON_TIMEOUT_S
+                                                    : IOT_LOG_BEACON_GRACE_S);
+                }
             }
         }
     }
@@ -586,7 +673,7 @@ void iot_log(iot_log_level_t level, const char *fmt, ...)
     payload[0] = (uint8_t)level;
     memcpy(payload + 1, msg, msg_len);
 
-    send_message(IOT_LOG_TYPE_TEXT, payload, 1 + msg_len);
+    send_message(IOT_LOG_TYPE_TEXT, payload, 1 + msg_len, false);
 
     k_mutex_unlock(&s_log_mutex);
 }
@@ -608,7 +695,7 @@ bool iot_log_send_raw(iot_log_level_t level, const char *msg, size_t len)
     payload[0] = (uint8_t)level;
     memcpy(payload + 1, msg, len);
 
-    bool ok = send_message(IOT_LOG_TYPE_TEXT, payload, 1 + len);
+    bool ok = send_message(IOT_LOG_TYPE_TEXT, payload, 1 + len, false);
 
     k_mutex_unlock(&s_log_mutex);
     return ok;
@@ -635,7 +722,7 @@ void iot_log_metric(const char *name, int32_t value)
     payload[1 + name_len + 2] = (uint8_t)(value >> 16);
     payload[1 + name_len + 3] = (uint8_t)(value >> 24);
 
-    send_message(IOT_LOG_TYPE_METRIC, payload, 1 + name_len + 4);
+    send_message(IOT_LOG_TYPE_METRIC, payload, 1 + name_len + 4, false);
 
     k_mutex_unlock(&s_log_mutex);
 }
@@ -666,7 +753,7 @@ void iot_log_metric_str(const char *name, const char *value)
     payload[1 + name_len] = (uint8_t)value_len;
     memcpy(payload + 2 + name_len, value, value_len);
 
-    send_message(IOT_LOG_TYPE_METRIC, payload, 2 + name_len + value_len);
+    send_message(IOT_LOG_TYPE_METRIC, payload, 2 + name_len + value_len, false);
 
     k_mutex_unlock(&s_log_mutex);
 }
