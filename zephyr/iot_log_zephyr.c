@@ -337,23 +337,40 @@ static void iot_log_poll_work_handler(struct k_work *work)
          * mode (most often `bail_inactive` during pre-attach boot, but
          * also `ring_full` if drain can't keep up). Steady-state success
          * (calls climbing, queued climbing in lockstep) stays quiet. */
+        /* Total dropped messages from a user perspective: anything that
+         * went into the log subsystem and didn't end up on the wire.
+         *   send       — reached send_message() but sendto failed or the
+         *                listener-active gate fired there
+         *   inactive   — backend bailed at iot_log_is_active() before
+         *                queueing (the dominant case while listener_active=0)
+         *   nofmt/zlen — formatter unavailable / produced nothing
+         *   rfull      — ring buffer was full at queue time
+         * The previous version printed only `s_log.dropped_count` as
+         * `drop`, which read as "no drops" while inactive=N grew — the
+         * naming was misleading. We now print the aggregate, with a
+         * granular breakdown after for diagnosis. */
+        uint32_t drop_total = s_log.dropped_count + be_inactive +
+                              be_no_fmt + be_zero_len + be_ring_full;
         bool emit = (prev_attached != (int8_t)attached_now) ||
                     (prev_active != (int8_t)active_now) ||
-                    (s_log.dropped_count > prev_dropped) ||
+                    (drop_total > prev_dropped) ||
                     (be_calls > prev_calls && be_queued == prev_queued);
         if (emit) {
             LOG_INF("status: sent=%u drop=%u attached=%d active=%d "
-                    "be[calls=%u inactive=%u nofmt=%u zlen=%u queued=%u rfull=%u]",
+                    "be[calls=%u send=%u inactive=%u nofmt=%u zlen=%u "
+                    "queued=%u rfull=%u]",
                     (unsigned)s_log.sent_count,
-                    (unsigned)s_log.dropped_count,
+                    (unsigned)drop_total,
                     (int)attached_now,
                     (int)active_now,
-                    (unsigned)be_calls, (unsigned)be_inactive,
+                    (unsigned)be_calls,
+                    (unsigned)s_log.dropped_count,
+                    (unsigned)be_inactive,
                     (unsigned)be_no_fmt, (unsigned)be_zero_len,
                     (unsigned)be_queued, (unsigned)be_ring_full);
             prev_attached = attached_now;
             prev_active = active_now;
-            prev_dropped = s_log.dropped_count;
+            prev_dropped = drop_total;
             prev_calls = be_calls;
             prev_queued = be_queued;
         }
