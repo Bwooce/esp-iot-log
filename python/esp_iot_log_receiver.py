@@ -436,9 +436,10 @@ class ESPIoTLogReceiver:
 
     def __init__(self, multicast_ip: str, port: int, service_name: str,
                  output_file: Optional[str] = None, json_output: bool = False,
-                 multicast_ip6: Optional[str] = None):
+                 multicast_ip6: Optional[str] = None, iface6: Optional[str] = None):
         self.multicast_ip = multicast_ip
         self.multicast_ip6 = multicast_ip6
+        self.iface6 = iface6
         self.port = port
         self.service_name = service_name
         self.output_file = output_file
@@ -528,7 +529,8 @@ class ESPIoTLogReceiver:
             if self.json_output:
                 params.append("Format: JSON")
             if self.multicast_ip6:
-                params.append(f"IPv6: {self.multicast_ip6}")
+                iface_info = f" on iface {self.iface6}" if self.iface6 else ""
+                params.append(f"IPv6: {self.multicast_ip6}{iface_info}")
 
             param_str = f" ({', '.join(params)})" if params else ""
             self.file_handle.write(f"\n{timestamp} === ESP IoT Log Receiver started on {hostname}{param_str} ===\n")
@@ -614,8 +616,21 @@ class ESPIoTLogReceiver:
         # Bind to all IPv6 interfaces on the port
         self.sock6.bind(('::', self.port))
 
-        # Join IPv6 multicast group on all interfaces (index 0 = all)
-        mreq6 = struct.pack("16sI", socket.inet_pton(socket.AF_INET6, self.multicast_ip6), 0)
+        # Determine interface index
+        ifindex = 0
+        if self.iface6:
+            try:
+                ifindex = int(self.iface6)
+            except ValueError:
+                try:
+                    ifindex = socket.if_nametoindex(self.iface6)
+                except AttributeError:
+                    print(f"! Warning: socket.if_nametoindex not supported on this platform. Try passing numeric index.")
+                except OSError as e:
+                    print(f"! Failed to find IPv6 interface '{self.iface6}': {e}. Falling back to all interfaces (0).")
+
+        # Join IPv6 multicast group
+        mreq6 = struct.pack("16sI", socket.inet_pton(socket.AF_INET6, self.multicast_ip6), ifindex)
         self.sock6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_JOIN_GROUP, mreq6)
 
         # Set multicast hop limit for beacons (8 hops — enough for mesh + BR)
@@ -666,7 +681,10 @@ class ESPIoTLogReceiver:
                 if self.sock6:
                     self._send_beacon6()
 
-                # Re-register mDNS for IPv4 ESP devices
+                # Re-register mDNS for IPv4 ESP devices.
+                # Failures are usually benign — host Avahi and python zeroconf
+                # racing for the same record. Print first failure only so a
+                # genuine regression is still visible, but stop spamming.
                 if time.time() - self._last_mdns_registration > self._mdns_re_registration_interval:
                     if self.zeroconf and self.service_info:
                         try:
@@ -674,7 +692,9 @@ class ESPIoTLogReceiver:
                             self.zeroconf.register_service(self.service_info)
                             self._last_mdns_registration = time.time()
                         except Exception as e:
-                            print(f"! mDNS re-registration failed: {e}")
+                            if not getattr(self, '_mdns_warn_emitted', False):
+                                print(f"! mDNS re-registration failed (suppressing further): {e}")
+                                self._mdns_warn_emitted = True
 
             except Exception as e:
                 if self.running:
@@ -764,6 +784,8 @@ def main():
                             f'(default: {DEFAULT_MULTICAST_IP6}, use --no-ip6 to disable)')
     parser.add_argument('--no-ip6', action='store_true',
                        help='Disable IPv6 multicast listener')
+    parser.add_argument('--iface6',
+                       help='Network interface name or index for IPv6 multicast (e.g., eth0, wlan0, 2)')
     parser.add_argument('--port', type=int, default=DEFAULT_MULTICAST_PORT,
                        help=f'UDP port (default: {DEFAULT_MULTICAST_PORT})')
     parser.add_argument('--service', default=DEFAULT_SERVICE_NAME,
@@ -812,7 +834,7 @@ def main():
 
     # Start receiver
     with ESPIoTLogReceiver(args.ip, args.port, args.service, args.output, args.json,
-                           multicast_ip6=ip6_addr) as receiver:
+                           multicast_ip6=ip6_addr, iface6=args.iface6) as receiver:
         if receiver.start():
             try:
                 receiver.listen()
