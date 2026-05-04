@@ -345,16 +345,31 @@ static void iot_log_poll_work_handler(struct k_work *work)
          *                queueing (the dominant case while listener_active=0)
          *   nofmt/zlen — formatter unavailable / produced nothing
          *   rfull      — ring buffer was full at queue time
-         * The previous version printed only `s_log.dropped_count` as
-         * `drop`, which read as "no drops" while inactive=N grew — the
-         * naming was misleading. We now print the aggregate, with a
-         * granular breakdown after for diagnosis. */
+         * Display only — naming the aggregate `drop` so the operator
+         * sees "how many lines were lost" at a glance. */
         uint32_t drop_total = s_log.dropped_count + be_inactive +
                               be_no_fmt + be_zero_len + be_ring_full;
-        bool emit = (prev_attached != (int8_t)attached_now) ||
-                    (prev_active != (int8_t)active_now) ||
-                    (drop_total > prev_dropped) ||
-                    (be_calls > prev_calls && be_queued == prev_queued);
+
+        /* Emit gating. Earlier versions used `(drop_total > prev_dropped)`
+         * which fires on every poll while the listener is inactive (each
+         * tick increments be_inactive). That spammed the log once per
+         * second indefinitely. Better to emit on:
+         *   1. state edges (attached/active flips) — operator wants to
+         *      see those immediately
+         *   2. send-layer failures (sendto error) — those are real
+         *      socket-level problems, rare, worth showing
+         *   3. a slow heartbeat so the counters are visible periodically
+         * Inactive-bail growth is expected and silent until something
+         * else changes. */
+        static int64_t last_emit_ms = 0;
+        int64_t now_ms = k_uptime_get();
+        const int64_t HEARTBEAT_MS = 5 * 60 * 1000; /* 5 minutes */
+        bool state_change   = (prev_attached != (int8_t)attached_now) ||
+                              (prev_active != (int8_t)active_now);
+        bool send_failed    = (s_log.dropped_count > prev_dropped);
+        bool heartbeat_due  = (last_emit_ms == 0) ||
+                              ((now_ms - last_emit_ms) >= HEARTBEAT_MS);
+        bool emit = state_change || send_failed || heartbeat_due;
         if (emit) {
             LOG_INF("status: sent=%u drop=%u attached=%d active=%d "
                     "be[calls=%u send=%u inactive=%u nofmt=%u zlen=%u "
@@ -370,9 +385,10 @@ static void iot_log_poll_work_handler(struct k_work *work)
                     (unsigned)be_queued, (unsigned)be_ring_full);
             prev_attached = attached_now;
             prev_active = active_now;
-            prev_dropped = drop_total;
+            prev_dropped = s_log.dropped_count;
             prev_calls = be_calls;
             prev_queued = be_queued;
+            last_emit_ms = now_ms;
         }
 
         k_work_reschedule(&iot_log_poll_work, IOT_LOG_POLL_INTERVAL);
