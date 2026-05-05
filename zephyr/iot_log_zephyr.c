@@ -164,6 +164,10 @@ static void check_for_beacons(void)
             s_log.last_beacon_ms = k_uptime_get();
             s_log.listener_active = true;
             s_log.beacon_confirmed = true;
+            /* Real beacon arrived — clear the timeout/refresh log throttle
+             * (declared near the poll loop) so the next state change emits cleanly. */
+            extern uint32_t iot_log_consec_fail;
+            iot_log_consec_fail = 0;
             if (!was_active) {
                 LOG_INF("Log listener discovered via beacon");
             }
@@ -597,6 +601,16 @@ void iot_log_poll(void)
      * cause those messages to be dropped at send time. Drain → then expire. */
     iot_log_backend_drain();
 
+    /* Throttle for the timeout/refresh log lines below. Without it,
+     * those LOG_INF lines fire every cycle while the listener can't
+     * recover (Apple BBR multicast-proxy gap, etc) — once a minute,
+     * forever, drowning the log. We emit the first 2 cycles for
+     * visibility then go silent until either a real beacon arrives
+     * (counter cleared in check_for_beacons) or an hourly heartbeat
+     * tick. Storage definition is at file scope below this function. */
+    extern uint32_t iot_log_consec_fail;
+    static const uint32_t IOT_LOG_HEARTBEAT_CYCLES = 60; /* ~60 min */
+
     /* Expire listener if no beacon received within timeout.
      * Uses shorter grace period until first real beacon arrives,
      * then the normal 3x-interval timeout after that. */
@@ -612,21 +626,28 @@ void iot_log_poll(void)
                  * gets dropped at the backend's listener-active gate, and
                  * the outage looks identical to a hard fault from the
                  * receiver's side. */
-                char banner[96];
-                int n = snprintf(banner, sizeof(banner),
-                                 "iot_log: listener timed out (%s, %llds) — going silent",
-                                 s_log.beacon_confirmed ? "no beacon" : "grace expired",
-                                 elapsed / 1000);
-                if (n > 0) {
-                    send_text_force(IOT_LOG_INFO, banner);
+                bool log_this = (iot_log_consec_fail < 2) ||
+                                (iot_log_consec_fail % IOT_LOG_HEARTBEAT_CYCLES == 0);
+                if (log_this) {
+                    char banner[96];
+                    int n = snprintf(banner, sizeof(banner),
+                                     "iot_log: listener timed out (%s, %llds) — going silent",
+                                     s_log.beacon_confirmed ? "no beacon" : "grace expired",
+                                     elapsed / 1000);
+                    if (n > 0) {
+                        send_text_force(IOT_LOG_INFO, banner);
+                    }
                 }
                 s_log.listener_active = false;
                 /* Reset MLR-refresh phase so the first refresh fires soon
                  * (within IOT_LOG_MLR_REFRESH_S) rather than instantly. */
                 s_log.last_resubscribe_ms = k_uptime_get();
-                LOG_INF("Log listener timed out (%s, %llds)",
-                        s_log.beacon_confirmed ? "no beacon" : "grace expired",
-                        elapsed / 1000);
+                if (log_this) {
+                    LOG_INF("Log listener timed out (%s, %llds)",
+                            s_log.beacon_confirmed ? "no beacon" : "grace expired",
+                            elapsed / 1000);
+                }
+                iot_log_consec_fail++;
             }
         }
 
@@ -645,22 +666,34 @@ void iot_log_poll(void)
                     s_log.last_resubscribe_ms = now;
                     s_log.last_beacon_ms = now;
                     s_log.listener_active = true;
-                    char banner[96];
-                    int n = snprintf(banner, sizeof(banner),
-                                     "iot_log: MLR refresh — re-asserting %s subscription",
-                                     s_log.mcast_ip);
-                    if (n > 0) {
-                        send_text_force(IOT_LOG_INFO, banner);
+                    /* Throttle: same gate as the timeout-LOG above. After
+                     * a couple of failed cycles we know the recovery isn't
+                     * going to take, so stop logging the attempt every
+                     * minute. Hourly heartbeat keeps the trail visible. */
+                    bool log_this = (iot_log_consec_fail < 2) ||
+                                    (iot_log_consec_fail % IOT_LOG_HEARTBEAT_CYCLES == 0);
+                    if (log_this) {
+                        char banner[96];
+                        int n = snprintf(banner, sizeof(banner),
+                                         "iot_log: MLR refresh — re-asserting %s subscription",
+                                         s_log.mcast_ip);
+                        if (n > 0) {
+                            send_text_force(IOT_LOG_INFO, banner);
+                        }
+                        LOG_INF("MLR refresh on [%s]; %ds optimistic grace",
+                                s_log.mcast_ip,
+                                s_log.beacon_confirmed ? IOT_LOG_BEACON_TIMEOUT_S
+                                                        : IOT_LOG_BEACON_GRACE_S);
                     }
-                    LOG_INF("MLR refresh on [%s]; %ds optimistic grace",
-                            s_log.mcast_ip,
-                            s_log.beacon_confirmed ? IOT_LOG_BEACON_TIMEOUT_S
-                                                    : IOT_LOG_BEACON_GRACE_S);
                 }
             }
         }
     }
 }
+
+/* Defined here (next to the only producer/consumer site) and externed
+ * from check_for_beacons so that path can clear it on real recovery. */
+uint32_t iot_log_consec_fail = 0;
 
 bool iot_log_is_active(void)
 {
