@@ -17,6 +17,7 @@
 #include <zephyr/logging/log_output.h>
 #include <zephyr/logging/log_backend_std.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/logging/log_ctrl.h>   /* log_source_name_get() */
 #include <zephyr/kernel.h>
 #include <zephyr/sys/ring_buffer.h>
 
@@ -48,6 +49,18 @@ static uint32_t s_process_bail_no_fmt;
 static uint32_t s_process_bail_zero_len;
 static uint32_t s_process_queued;
 static uint32_t s_process_ring_full;
+static uint32_t s_process_bail_self;   /* dropped: source is our own transport */
+
+/* Log sources whose messages we must NEVER rebroadcast, because doing so
+ * would feed a send-failure feedback loop: this backend multicasts over the
+ * OpenThread/IPv6 radio, and when that transport runs out of message buffers
+ * it logs (from "net_otPlat_radio") "Cannot allocate new message buffer" /
+ * "Error while calling otIp6Send". Queueing those for multicast makes the
+ * drain thread try to send them over the very transport that just failed,
+ * generating more NoBufs errors — a self-sustaining storm that starves MQTT.
+ * Drop them here; the UART and web-ring backends still record them. The match
+ * is by source name so it's a no-op on platforms without that source. */
+static const char *const k_transport_sources[] = { "net_otPlat_radio" };
 
 void log_backend_iot_get_stats(uint32_t *calls, uint32_t *bail_inactive,
                                 uint32_t *bail_no_fmt, uint32_t *bail_zero_len,
@@ -85,6 +98,23 @@ static void process(const struct log_backend *const backend,
         return;
     }
 
+    /* Drop messages from our own transport's sources — rebroadcasting a
+     * "no message buffer" error needs a message buffer, which feeds a NoBufs
+     * storm. See k_transport_sources. UART/web backends still record them. */
+    const void *src = log_msg_get_source(&msg->log);
+    if (src != NULL) {
+        const char *sname =
+            log_source_name_get(log_msg_get_domain(&msg->log), log_source_id(src));
+        if (sname != NULL) {
+            for (size_t i = 0; i < ARRAY_SIZE(k_transport_sources); i++) {
+                if (strcmp(sname, k_transport_sources[i]) == 0) {
+                    s_process_bail_self++;
+                    return;
+                }
+            }
+        }
+    }
+
     /* Format the message — skip level and timestamp since the binary
      * protocol header carries both. Keep module name for context. */
     msg_pos = 0;
@@ -100,6 +130,23 @@ static void process(const struct log_backend *const backend,
     if (msg_pos == 0) {
         s_process_bail_zero_len++;
         return;
+    }
+
+    /* Don't multicast the high-volume OT-internal per-frame chatter (radio MAC
+     * tx attempts, per-packet forwarding). These come through log_generic()
+     * with no Zephyr source, so they can't be source-filtered like
+     * k_transport_sources — match OpenThread's region tag in the formatted
+     * text instead. They still reach the UART and web-ring backends for local
+     * debug; this only keeps the multicast stream (and the OT buffer pool)
+     * from being flooded. At NOTE log level these aren't emitted at all — this
+     * guard matters when OT logging is raised to INFO for a deep RF dive. */
+    static const char *const k_drop_prefixes[] = { "[I] Mac", "[I] MeshForwarder" };
+    for (size_t i = 0; i < ARRAY_SIZE(k_drop_prefixes); i++) {
+        size_t plen = strlen(k_drop_prefixes[i]);
+        if (msg_pos >= plen && memcmp(msg_buf, k_drop_prefixes[i], plen) == 0) {
+            s_process_bail_self++;
+            return;
+        }
     }
 
     /* Map Zephyr log level to iot_log level */
