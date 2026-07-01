@@ -132,20 +132,27 @@ static void process(const struct log_backend *const backend,
         return;
     }
 
-    /* Don't multicast the high-volume OT-internal per-frame chatter (radio MAC
-     * tx attempts, per-packet forwarding). These come through log_generic()
+    /* Don't multicast OpenThread's per-frame transport chatter (radio MAC and
+     * 6LoWPAN forwarding) at ANY log level. These come through log_generic()
      * with no Zephyr source, so they can't be source-filtered like
      * k_transport_sources — match OpenThread's region tag in the formatted
-     * text instead. They still reach the UART and web-ring backends for local
-     * debug; this only keeps the multicast stream (and the OT buffer pool)
-     * from being flooded. At NOTE log level these aren't emitted at all — this
-     * guard matters when OT logging is raised to INFO for a deep RF dive. */
-    static const char *const k_drop_prefixes[] = { "[I] Mac", "[I] MeshForwarder" };
-    for (size_t i = 0; i < ARRAY_SIZE(k_drop_prefixes); i++) {
-        size_t plen = strlen(k_drop_prefixes[i]);
-        if (msg_pos >= plen && memcmp(msg_buf, k_drop_prefixes[i], plen) == 0) {
-            s_process_bail_self++;
-            return;
+     * text "[<lvl>] <Region>-...". At INFO it's the per-tx-attempt firehose;
+     * even at NOTE, MeshForwarder emits "Dropping rx (frag) frame" — and since
+     * iot_log's own multicast packets are large and get 6LoWPAN-fragmented,
+     * its traffic generates those very drops, which it would then re-multicast:
+     * a second feedback path on top of the NoBufs one. Drop the whole region
+     * from the multicast (it still reaches UART/web for local debug); Mle
+     * state (attach/role/parent) and app logs still go out. */
+    static const char *const k_drop_regions[] = { "Mac", "MeshForwarder" };
+    if (msg_pos > 4 && msg_buf[0] == '[' && msg_buf[2] == ']' && msg_buf[3] == ' ') {
+        const char *region = &msg_buf[4];
+        size_t avail = msg_pos - 4;
+        for (size_t i = 0; i < ARRAY_SIZE(k_drop_regions); i++) {
+            size_t rlen = strlen(k_drop_regions[i]);
+            if (avail >= rlen && memcmp(region, k_drop_regions[i], rlen) == 0) {
+                s_process_bail_self++;
+                return;
+            }
         }
     }
 
