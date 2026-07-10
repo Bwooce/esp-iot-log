@@ -483,6 +483,12 @@ class ESPIoTLogReceiver:
         print(f"Multicast IPv4: {self.multicast_ip}:{self.port}")
         if self.multicast_ip6:
             print(f"Multicast IPv6: [{self.multicast_ip6}]:{self.port}")
+        # The IPv4 socket binds INADDR_ANY:port AND joins the multicast group, so it
+        # accepts BOTH multicast and direct unicast on the same port simultaneously.
+        # Unicast is the working path for devices whose Wi-Fi transport drops
+        # multicast TX (e.g. ESP32-P4 + C6/esp_hosted) — point the device's
+        # iot_log_host at this machine and it lands here with no mDNS discovery.
+        print(f"Unicast IPv4:   <this host>:{self.port} (accepted on the same socket)")
         print(f"Service: {self.service_name}")
 
         self.running = True
@@ -599,7 +605,9 @@ class ESPIoTLogReceiver:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-        # Bind to all interfaces on the port
+        # Bind to all interfaces on the port. INADDR_ANY means this socket also
+        # receives UNICAST datagrams sent to any of this host's IPs on this port —
+        # so multicast (via the group join below) and unicast are handled together.
         self.sock.bind(('', self.port))
 
         # Join IPv4 multicast group

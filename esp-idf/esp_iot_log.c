@@ -39,6 +39,9 @@ static struct {
     int             sock;
     struct sockaddr_in mcast_addr;
 
+    bool            unicast_active;   /* unicast override configured */
+    struct sockaddr_in unicast_addr;  /* destination when unicast_active */
+
     uint64_t        device_id;
     char            device_name[32];
 
@@ -69,7 +72,7 @@ static uint16_t crc16_ccitt(const uint8_t *data, size_t length)
 /* Send a raw log message using the binary protocol */
 static bool send_message(iot_log_type_t type, const uint8_t *payload, size_t payload_len)
 {
-    if (!s_log.initialised || !s_log.listener_active) {
+    if (!s_log.initialised || (!s_log.listener_active && !s_log.unicast_active)) {
         s_log.dropped_count++;
         return false;
     }
@@ -123,10 +126,25 @@ static bool send_message(iot_log_type_t type, const uint8_t *payload, size_t pay
     packet[HEADER_SIZE + payload_len]     = crc & 0xFF;
     packet[HEADER_SIZE + payload_len + 1] = (crc >> 8) & 0xFF;
 
-    ssize_t sent = sendto(s_log.sock, packet, total_size, 0,
-                          (struct sockaddr *)&s_log.mcast_addr,
-                          sizeof(s_log.mcast_addr));
-    if (sent == (ssize_t)total_size) {
+    bool ok = false;
+
+    /* Unicast (working path where multicast TX is dropped) — no listener gate. */
+    if (s_log.unicast_active) {
+        ssize_t s = sendto(s_log.sock, packet, total_size, 0,
+                           (struct sockaddr *)&s_log.unicast_addr,
+                           sizeof(s_log.unicast_addr));
+        if (s == (ssize_t)total_size) ok = true;
+    }
+
+    /* Multicast — only when an mDNS listener was discovered. */
+    if (s_log.listener_active) {
+        ssize_t s = sendto(s_log.sock, packet, total_size, 0,
+                           (struct sockaddr *)&s_log.mcast_addr,
+                           sizeof(s_log.mcast_addr));
+        if (s == (ssize_t)total_size) ok = true;
+    }
+
+    if (ok) {
         s_log.sent_count++;
         return true;
     } else {
@@ -226,10 +244,26 @@ int iot_log_init(const iot_log_config_t *config)
     int ttl = 1;
     setsockopt(s_log.sock, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl));
 
+    /* Unicast override destination (same port as multicast). Active only when a
+     * non-empty unicast_ip is given. Bypasses mDNS discovery — see send_message(). */
+    s_log.unicast_active = false;
+    if (cfg.unicast_ip && cfg.unicast_ip[0]) {
+        memset(&s_log.unicast_addr, 0, sizeof(s_log.unicast_addr));
+        s_log.unicast_addr.sin_family = AF_INET;
+        s_log.unicast_addr.sin_port   = htons(mcast_port);
+        if (inet_pton(AF_INET, cfg.unicast_ip, &s_log.unicast_addr.sin_addr) == 1) {
+            s_log.unicast_active = true;
+        } else {
+            ESP_LOGW(TAG, "unicast_ip '%s' invalid — unicast disabled", cfg.unicast_ip);
+        }
+    }
+
     s_log.initialised = true;
     s_log.last_discovery_us = 0; /* Force immediate discovery on first poll */
 
-    ESP_LOGI(TAG, "Initialised: %s -> %s:%d", s_log.device_name, mcast_ip, mcast_port);
+    ESP_LOGI(TAG, "Initialised: %s -> mcast %s:%d%s%s", s_log.device_name, mcast_ip, mcast_port,
+             s_log.unicast_active ? " + unicast " : "",
+             s_log.unicast_active ? cfg.unicast_ip : "");
     return 0;
 }
 
@@ -300,8 +334,8 @@ void iot_log(iot_log_level_t level, const char *fmt, ...)
         }
     }
 
-    /* Send over network if listener active */
-    if (s_log.listener_active) {
+    /* Send over network if a listener is active OR unicast is configured */
+    if (s_log.listener_active || s_log.unicast_active) {
         size_t msg_len = strlen(msg);
         if (msg_len > 500) msg_len = 500;
 
@@ -315,7 +349,7 @@ void iot_log(iot_log_level_t level, const char *fmt, ...)
 
 void iot_log_metric(const char *name, int32_t value)
 {
-    if (!s_log.initialised || !s_log.listener_active) return;
+    if (!s_log.initialised || (!s_log.listener_active && !s_log.unicast_active)) return;
     if (!name || name[0] == '\0') return;
 
     size_t name_len = strlen(name);
@@ -335,7 +369,7 @@ void iot_log_metric(const char *name, int32_t value)
 
 void iot_log_metric_str(const char *name, const char *value)
 {
-    if (!s_log.initialised || !s_log.listener_active) return;
+    if (!s_log.initialised || (!s_log.listener_active && !s_log.unicast_active)) return;
     if (!name || name[0] == '\0') return;
     if (!value) value = "";
 

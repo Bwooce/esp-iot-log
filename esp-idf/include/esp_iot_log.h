@@ -53,6 +53,13 @@ typedef struct {
     uint16_t         multicast_port;    /* 0 for default 4210 */
     uint32_t         discovery_interval_ms;  /* 0 for default 60s */
     bool             redirect_esp_log;  /* Hook ESP_LOGx to also send via iot_log */
+    /* Unicast override: when non-NULL/non-empty, ALSO send every log/metric as a
+     * unicast UDP datagram to this host on multicast_port (default 4210), with NO
+     * mDNS-listener gate (unicast doesn't need discovery). This is the working path
+     * on boards where the Wi-Fi transport drops multicast TX (esp_hosted/C6 — see
+     * memory/project_esp_hosted_multicast_tx_broken). Multicast still fires too when
+     * a listener is discovered; the receiver accepts both on one socket. */
+    const char      *unicast_ip;        /* NULL/"" = multicast-only (legacy behaviour) */
 } iot_log_config_t;
 
 /* Default config initialiser */
@@ -64,6 +71,7 @@ typedef struct {
     .multicast_port = 0, \
     .discovery_interval_ms = 0, \
     .redirect_esp_log = false, \
+    .unicast_ip = NULL, \
 }
 
 /**
