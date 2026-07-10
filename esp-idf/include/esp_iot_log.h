@@ -60,6 +60,11 @@ typedef struct {
      * memory/project_esp_hosted_multicast_tx_broken). Multicast still fires too when
      * a listener is discovered; the receiver accepts both on one socket. */
     const char      *unicast_ip;        /* NULL/"" = multicast-only (legacy behaviour) */
+    /* Skip mDNS entirely: don't call mdns_init() and never run listener discovery.
+     * Saves the ~4 KB mDNS task stack + buffers and the periodic discovery CPU on
+     * boards where multicast TX is dropped anyway (so discovery can never succeed) —
+     * use with unicast_ip for a working, mDNS-free telemetry path. */
+    bool             disable_mdns;      /* true = no mdns_init(), no discovery */
 } iot_log_config_t;
 
 /* Default config initialiser */
@@ -72,6 +77,7 @@ typedef struct {
     .discovery_interval_ms = 0, \
     .redirect_esp_log = false, \
     .unicast_ip = NULL, \
+    .disable_mdns = false, \
 }
 
 /**

@@ -33,6 +33,7 @@ static const char *TAG = "iot_log";
 static struct {
     bool            initialised;
     bool            listener_active;
+    bool            disable_mdns;     /* skip mdns_init() + discovery entirely */
     iot_log_level_t level;
     bool            serial_mirror;
 
@@ -194,6 +195,7 @@ int iot_log_init(const iot_log_config_t *config)
 
     s_log.level = cfg.level;
     s_log.serial_mirror = cfg.serial_mirror;
+    s_log.disable_mdns = cfg.disable_mdns;
     s_log.discovery_interval_ms = cfg.discovery_interval_ms > 0 ?
         cfg.discovery_interval_ms : DISCOVERY_MIN_INTERVAL_MS;
 
@@ -213,11 +215,14 @@ int iot_log_init(const iot_log_config_t *config)
                  "ESP-%02X%02X%02X", mac[3], mac[4], mac[5]);
     }
 
-    /* Initialise mDNS (may already be running) */
-    esp_err_t err = mdns_init();
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGE(TAG, "mDNS init failed: %s", esp_err_to_name(err));
-        return -1;
+    /* Initialise mDNS (may already be running) — skipped entirely when
+     * disable_mdns is set, which avoids creating the ~4 KB mDNS task. */
+    if (!s_log.disable_mdns) {
+        esp_err_t err = mdns_init();
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGE(TAG, "mDNS init failed: %s", esp_err_to_name(err));
+            return -1;
+        }
     }
 
     /* Create UDP socket */
@@ -283,6 +288,7 @@ void iot_log_deinit(void)
 void iot_log_poll(void)
 {
     if (!s_log.initialised) return;
+    if (s_log.disable_mdns) return;  /* no mDNS -> nothing to discover */
 
     int64_t now = esp_timer_get_time();
     uint32_t effective_interval_ms = s_log.listener_active ?
