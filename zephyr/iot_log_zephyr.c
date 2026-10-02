@@ -28,6 +28,18 @@
 #include <openthread/ip6.h>
 #include <openthread/instance.h>
 
+/* Zephyr trees that ship the OpenThread module header <openthread.h> lock the
+ * stack with openthread_mutex_lock() and deprecate the context-based
+ * openthread_api_mutex_lock(). Older trees only have the latter. */
+#if defined(__has_include) && __has_include(<openthread.h>)
+#include <openthread.h>
+#define IOT_LOG_OT_LOCK(ctx)   do { ARG_UNUSED(ctx); openthread_mutex_lock(); } while (0)
+#define IOT_LOG_OT_UNLOCK(ctx) do { ARG_UNUSED(ctx); openthread_mutex_unlock(); } while (0)
+#else
+#define IOT_LOG_OT_LOCK(ctx)   openthread_api_mutex_lock(ctx)
+#define IOT_LOG_OT_UNLOCK(ctx) openthread_api_mutex_unlock(ctx)
+#endif
+
 /* v3.3: openthread_context.instance is no longer populated by the L2 layer.
  * The new singleton accessor lives in the openthread module's internal
  * header which we don't pull in directly. Forward-declare here. */
@@ -92,7 +104,7 @@ static uint64_t get_device_id(void)
     struct openthread_context *ot_context = openthread_get_default_context();
 
     if (ot_context) {
-        openthread_api_mutex_lock(ot_context);
+        IOT_LOG_OT_LOCK(ot_context);
         const otExtAddress *ext = otLinkGetExtendedAddress(openthread_get_default_instance());
         if (ext) {
             /* Pack 8-byte EUI-64 into uint64_t, little-endian to match ESP MAC format */
@@ -100,7 +112,7 @@ static uint64_t get_device_id(void)
                 id = (id << 8) | ext->m8[i];
             }
         }
-        openthread_api_mutex_unlock(ot_context);
+        IOT_LOG_OT_UNLOCK(ot_context);
     }
 
     return id;
@@ -115,12 +127,12 @@ static bool is_thread_attached(void)
     }
 
     bool attached = false;
-    openthread_api_mutex_lock(ot_context);
+    IOT_LOG_OT_LOCK(ot_context);
     otDeviceRole role = otThreadGetDeviceRole(openthread_get_default_instance());
     attached = (role == OT_DEVICE_ROLE_CHILD ||
                 role == OT_DEVICE_ROLE_ROUTER ||
                 role == OT_DEVICE_ROLE_LEADER);
-    openthread_api_mutex_unlock(ot_context);
+    IOT_LOG_OT_UNLOCK(ot_context);
 
     return attached;
 }
@@ -296,10 +308,10 @@ static bool refresh_mlr(void)
     }
     otIp6Address ot_mcast;
     otIp6AddressFromString(s_log.mcast_ip, &ot_mcast);
-    openthread_api_mutex_lock(ot_ctx);
+    IOT_LOG_OT_LOCK(ot_ctx);
     otIp6UnsubscribeMulticastAddress(openthread_get_default_instance(), &ot_mcast);
     otError err = otIp6SubscribeMulticastAddress(openthread_get_default_instance(), &ot_mcast);
-    openthread_api_mutex_unlock(ot_ctx);
+    IOT_LOG_OT_UNLOCK(ot_ctx);
     return (err == OT_ERROR_NONE || err == OT_ERROR_ALREADY);
 }
 
@@ -566,9 +578,9 @@ void iot_log_poll(void)
         if (ot_ctx) {
             otIp6Address ot_mcast;
             otIp6AddressFromString(s_log.mcast_ip, &ot_mcast);
-            openthread_api_mutex_lock(ot_ctx);
+            IOT_LOG_OT_LOCK(ot_ctx);
             otError err = otIp6SubscribeMulticastAddress(openthread_get_default_instance(), &ot_mcast);
-            openthread_api_mutex_unlock(ot_ctx);
+            IOT_LOG_OT_UNLOCK(ot_ctx);
             if (err == OT_ERROR_NONE || err == OT_ERROR_ALREADY) {
                 LOG_INF("Joined multicast group [%s]", s_log.mcast_ip);
                 s_log.mcast_joined = true;
