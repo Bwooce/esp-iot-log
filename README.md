@@ -346,6 +346,13 @@ Checksum: CRC16-CCITT (2 bytes)
 3. Verify multicast IP/port configuration
 4. Check firewall settings (allow UDP multicast)
 
+**Logs arrive for a few minutes after the receiver starts, then stop (and mDNS still finds the receiver):**
+The network has IGMP snooping on but no IGMP querier. The access point forwards 239.255.1.100 only to hosts that
+recently reported membership, and without a querier the host never re-reports, so the entry ages out. mDNS keeps
+working because 224.0.0.251 is link-local and is never snooped. The receiver re-joins the group every 60 s
+(`IGMP_REFRESH_INTERVAL`), which sends a fresh report. The proper network fix is to enable an IGMP querier on the
+router or switch, not to turn snooping off.
+
 **High message drop rate:**
 1. Reduce logging frequency
 2. Lower log level (INFO instead of VERBOSE)

@@ -66,6 +66,11 @@ class Colors:
 # Devices listen for this on the multicast group to decide whether to send.
 BEACON_TYPE = 0xFF
 BEACON_INTERVAL = 30  # seconds
+# Re-join the IPv4 group this often. On a network with IGMP snooping but no IGMP
+# querier, nobody asks the host to re-report the group, so the switch / access
+# point forgets the membership after a few minutes and stops forwarding the
+# devices' packets. Leaving and re-joining sends a fresh membership report.
+IGMP_REFRESH_INTERVAL = 60  # seconds
 
 
 def build_beacon_packet() -> bytes:
@@ -457,6 +462,10 @@ class ESPIoTLogReceiver:
         self.start_time = time.time()
         self.devices_seen = set()
 
+        # IPv4 group membership, re-joined every IGMP_REFRESH_INTERVAL
+        self._mreq = None
+        self._last_igmp_join = 0
+
         # mDNS re-registration tracking (every 60 seconds)
         self._last_mdns_registration = 0
         self._mdns_re_registration_interval = 60  # seconds
@@ -613,8 +622,22 @@ class ESPIoTLogReceiver:
         # Join IPv4 multicast group
         mreq = struct.pack("4s4s", socket.inet_aton(self.multicast_ip), socket.inet_aton("0.0.0.0"))
         self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        self._mreq = mreq
+        self._last_igmp_join = time.time()
 
         self.sock.setblocking(False)
+
+    def _refresh_igmp(self):
+        """Leave and re-join the IPv4 group, which sends an unsolicited IGMP report."""
+        self._last_igmp_join = time.time()
+        try:
+            self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_DROP_MEMBERSHIP, self._mreq)
+        except OSError:
+            pass
+        try:
+            self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, self._mreq)
+        except OSError as e:
+            print(f"! IGMP re-join failed: {e}")
 
     def _start_udp6_listener(self):
         """Start UDP IPv6 multicast socket listener for Thread/OpenThread devices."""
@@ -685,6 +708,10 @@ class ESPIoTLogReceiver:
                             print(f"Error receiving data: {e}")
 
                 # Periodic maintenance
+                # Keep IGMP snooping forwarding the group (see IGMP_REFRESH_INTERVAL)
+                if self._mreq and time.time() - self._last_igmp_join > IGMP_REFRESH_INTERVAL:
+                    self._refresh_igmp()
+
                 # Send IPv6 beacon so Thread devices know we're listening
                 if self.sock6:
                     self._send_beacon6()
