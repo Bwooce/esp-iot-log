@@ -298,6 +298,31 @@ static void send_text_force(iot_log_level_t level, const char *msg)
     k_mutex_unlock(&s_log_mutex);
 }
 
+/* Make sure Zephyr still counts our group as joined on the OpenThread iface.
+ *
+ * Zephyr before PR #109203 (issue #109166, merged 2026-05-19; not in NCS
+ * 3.4.1 / Zephyr 4.4.2) marks every multicast group "not joined" when the
+ * OpenThread iface goes dormant on detach, and never rejoins on re-attach
+ * because the iface has NET_IF_IPV6_NO_ND set. The OT L2 only adds groups
+ * that are missing, so re-subscribing in OT does not help either. Zephyr's
+ * IPv6 input then drops every packet to the group as "unjoined", so beacons
+ * stop arriving after the first detach. Re-marking the group as joined fixes
+ * it; on a fixed Zephyr the group is already joined and this does nothing. */
+static void ensure_zephyr_mcast_joined(void)
+{
+    struct openthread_context *ot_ctx = openthread_get_default_context();
+    if (!ot_ctx || !ot_ctx->iface) {
+        return;
+    }
+    struct net_if *iface = ot_ctx->iface;
+    struct net_if_mcast_addr *maddr =
+        net_if_ipv6_maddr_lookup((const struct net_in6_addr *)&s_log.mcast_addr.sin6_addr, &iface);
+    if (maddr && !net_if_ipv6_maddr_is_joined(maddr)) {
+        net_if_ipv6_maddr_join(iface, maddr);
+        LOG_INF("mcast rejoined");
+    }
+}
+
 /* Unsubscribe + re-subscribe ff05::e510 so a fresh MLE Address Registration
  * is sent to the (possibly new) parent. Returns true on success. */
 static bool refresh_mlr(void)
@@ -599,6 +624,10 @@ void iot_log_poll(void)
         }
     }
 
+    if (s_log.mcast_joined && is_thread_attached()) {
+        ensure_zephyr_mcast_joined();
+    }
+
     /* Check for beacon packets first — beacons that arrive in the same poll
      * tick as the timeout check should refresh listener_active before any
      * expiry decision. */
@@ -665,10 +694,11 @@ void iot_log_poll(void)
 
         /* MLR self-heal: while listener is inactive, periodically refresh
          * our multicast subscription so a fresh MLE Address Registration
-         * reaches the parent. Some parents (observed: third-party Thread
-         * routers) silently drop our inbound multicast forwarding state
-         * across a re-attach, leaving outbound mcast working but inbound
-         * silently broken. After each refresh, give the optimistic-grace
+         * reaches the parent. (The long-running "inbound multicast broken
+         * after re-attach" symptom this was written for turned out to be
+         * the Zephyr bug handled by ensure_zephyr_mcast_joined(); the
+         * refresh is kept for parents that genuinely lose the registration.)
+         * After each refresh, give the optimistic-grace
          * window a chance to re-confirm via real beacons. */
         if (!s_log.listener_active && s_log.mcast_joined && is_thread_attached()) {
             int64_t now = k_uptime_get();
