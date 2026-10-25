@@ -664,8 +664,11 @@ class ESPIoTLogReceiver:
         mreq6 = struct.pack("16sI", socket.inet_pton(socket.AF_INET6, self.multicast_ip6), ifindex)
         self.sock6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_JOIN_GROUP, mreq6)
 
-        # Set multicast hop limit for beacons (8 hops — enough for mesh + BR)
-        self.sock6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, 8)
+        # Multicast hop limit for beacons. 2 is enough: the border router takes one
+        # hop forwarding into Thread, and forwarding inside the mesh (MPL) takes none.
+        # A higher limit lets border routers bounce the beacon between the LAN and
+        # Thread until it runs out; with 8, one beacon became ~40 copies.
+        self.sock6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, 2)
 
         self.sock6.setblocking(False)
 
